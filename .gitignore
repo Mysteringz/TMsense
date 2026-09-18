@@ -1,0 +1,7 @@
+include/node_config.h
+build/
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store
