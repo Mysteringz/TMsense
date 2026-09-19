@@ -195,9 +195,10 @@ void setup() {
 
     // The banner answers what a person at a misbehaving node asks first:
     // which node is this, is it signing, where is it sending. Never the key.
-    Serial.printf("\n=== TMnode %s ===\n", TM_FW_VERSION);
+    Serial.printf("\n=== TMsense %s ===\n", TM_FW_VERSION);
     Serial.printf("[boot] uid     %02x:%02x:%02x:%02x:%02x:%02x   boot #%u\n", s_ctx.uid[0], s_ctx.uid[1],
                   s_ctx.uid[2], s_ctx.uid[3], s_ctx.uid[4], s_ctx.uid[5], (unsigned) s_ctx.boot);
+    if (g_settings.node_id) Serial.printf("[boot] node id %u\n", (unsigned) g_settings.node_id);
     Serial.printf("[boot] signing %s\n", s_ctx.key_len ? "on" : "OFF (no key; `set key ...`)");
     Serial.printf("[boot] edges   %s %s -> udp/%d\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)",
                   g_settings.edges[1], TM_UPLINK_PORT);

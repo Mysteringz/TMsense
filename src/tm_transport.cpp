@@ -32,8 +32,20 @@ static void load_edges() {
 
 void tm_transport_uid(uint8_t out[6]) { esp_read_mac(out, ESP_MAC_WIFI_STA); }
 
+static bool lora_mode() { return g_settings.mode == TM_MODE_LORA; }
+
 void tm_transport_begin() {
     load_edges();
+    if (lora_mode()) {
+        // The LoRa uplink (to TMLAccess) is not written yet. Say so plainly
+        // rather than quietly falling back to Wi-Fi: a node set to LoRa is
+        // presumably somewhere Wi-Fi is not wanted.
+        WiFi.mode(WIFI_OFF);
+        Serial.printf("[lora] mode is lora (TMLAccess %s), but this firmware has no LoRa uplink yet: "
+                      "nothing will be sent. `set mode wifi` to use Wi-Fi.\n",
+                      g_settings.lora_gw[0] ? g_settings.lora_gw : "(none)");
+        return;
+    }
     WiFi.mode(WIFI_STA);
     // Modem sleep saves little on a USB-powered node and makes downlink
     // commands arrive late or not at all.
@@ -59,7 +71,7 @@ void tm_transport_restart() {
 }
 
 void tm_transport_update() {
-    if (!g_settings.ssid[0]) return;
+    if (lora_mode() || !g_settings.ssid[0]) return;
     if (WiFi.status() == WL_CONNECTED) {
         if (!s_was_connected) {
             s_was_connected = true;
@@ -84,7 +96,7 @@ void tm_transport_update() {
     WiFi.begin(g_settings.ssid, g_settings.password);
 }
 
-bool tm_transport_connected() { return WiFi.status() == WL_CONNECTED; }
+bool tm_transport_connected() { return !lora_mode() && WiFi.status() == WL_CONNECTED; }
 
 int tm_transport_send(const uint8_t* data, size_t len, bool all_edges) {
     if (!tm_transport_connected() || s_edge_count == 0) return 0;

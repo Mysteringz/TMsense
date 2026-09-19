@@ -1,4 +1,7 @@
-# TMnode
+# TMsense
+
+*(formerly TMnode — the name still appears in code identifiers and the
+wire format, which are unchanged.)*
 
 Firmware for a thermal occupancy node: Heltec WiFi LoRa 32 V3 (ESP32-S3) and
 an MLX90640 with the 110 x 75 deg lens, ceiling-mounted 3-5 m up. It finds
@@ -28,6 +31,10 @@ later.
 
 ## Build and flash
 
+The easy way is **TMflash** (`../TMflash`), a Mac app that builds this
+firmware, flashes one board or up to 10 at once, and provisions each one (node
+ID, Wi-Fi/LoRa, SSID, password, gateway, key) in one click. By hand:
+
 ```bash
 tools/build.sh upload            # arduino-cli, esp32 core 2.0.17
 # or: pio run -t upload
@@ -41,9 +48,12 @@ Every node runs the same image. Its identity is its factory MAC. Settings go in
 over USB serial at 115200 baud and are kept in flash:
 
 ```
+set id <1-65535>          node ID: a label (enclosure, manifest); identity stays the MAC
+set mode wifi             or `lora` (stored; the LoRa uplink is not written yet)
 set ssid <network>        2.4 GHz only
 set pass <password>
-set edges 10.0.0.5,10.0.0.6   primary, secondary TMedge
+set edges 10.0.0.5,10.0.0.6   where to send: the site's TMWAccess, or TMedge directly
+set lora_gw <ip>          TMLAccess address, for LoRa mode
 set key <shared key>      same as TMedge's TM_KEY
 save
 reboot
@@ -51,6 +61,9 @@ reboot
 
 `show` prints the settings; the password and key are never printed. `help`
 lists everything else (detector parameters, `reset-bg`, `factory`).
+
+`pio run -e tmflash` builds the release image TMflash uses: identical, but
+built with `TM_NO_NODE_CONFIG` so no bench defaults are compiled in.
 
 For bench work you can also bake in defaults: copy
 `include/node_config.example.h` to `include/node_config.h` (git-ignored).

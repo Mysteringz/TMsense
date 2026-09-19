@@ -1,4 +1,4 @@
-# TMnode — notes for AI coding sessions
+# TMsense (formerly TMnode) — notes for AI coding sessions
 
 Firmware for the thermal occupancy node. Pairs with `../TMedge`.
 
@@ -32,6 +32,9 @@ TM_KEY=... python3 tools/listen.py --iface en0
   or a new packet type.
 - **One image, no per-node compile.** Identity = factory MAC; settings in NVS.
   Never add a setting that only a recompile can change.
+- **The serial console is an API**: TMflash (`../TMflash`) provisions nodes
+  through `show` / `set …` / `save` and parses `show`'s `name : value` lines
+  and the `<name> updated` / `saved` replies. Change both sides together.
 - **Never print the key or Wi-Fi password.** `show` reports only whether they
   are set.
 - **The boot counter is never reset** (not even by `factory`). Resetting it

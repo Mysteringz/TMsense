@@ -12,10 +12,18 @@ typedef struct {
     char password[65];
     char edges[TM_MAX_EDGES][16];   // dotted quads; empty = unused
     char key[TM_KEY_MAX_LEN + 1];   // ASCII; its bytes are the HMAC key
+    // A label people use for the node (on the enclosure, in the install
+    // manifest). Identity on the wire stays the factory MAC; 0 = unset.
+    uint16_t node_id;
+    uint8_t mode;                   // TM_MODE_*
+    char lora_gw[16];               // TMLAccess address, dotted quad; empty = unset
     int32_t params[TM_PARAM_COUNT];
     uint32_t last_cmd;              // highest command sequence applied
     uint16_t boot;                  // boot counter, incremented by tm_settings_begin
 } TmSettings;
+
+#define TM_MODE_WIFI 0
+#define TM_MODE_LORA 1
 
 extern TmSettings g_settings;
 

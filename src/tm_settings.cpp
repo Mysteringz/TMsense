@@ -1,9 +1,11 @@
 #include "tm_settings.h"
 
 #include <Arduino.h>
+#include <IPAddress.h>
 #include <Preferences.h>
 #include <math.h>
 #include <string.h>
+#include "tm_transport.h"
 
 TmSettings g_settings;
 
@@ -73,7 +75,13 @@ static void load_defaults() {
     strncpy(g_settings.password, TM_DEFAULT_PASSWORD, sizeof(g_settings.password) - 1);
     strncpy(g_settings.key, TM_DEFAULT_KEY, sizeof(g_settings.key) - 1);
     parse_edges(TM_DEFAULT_EDGES);
+    g_settings.mode = TM_MODE_WIFI;
     default_params(g_settings.params);
+}
+
+static bool is_ipv4(const char* s) {
+    IPAddress ip;
+    return ip.fromString(s);
 }
 
 void tm_settings_begin() {
@@ -87,6 +95,10 @@ void tm_settings_begin() {
         s_prefs.getString("edges", list, sizeof(list));
         parse_edges(list);
     }
+    g_settings.node_id = s_prefs.getUShort("node_id", 0);
+    const uint8_t mode = s_prefs.getUChar("mode", TM_MODE_WIFI);
+    g_settings.mode = mode == TM_MODE_LORA ? TM_MODE_LORA : TM_MODE_WIFI;
+    if (s_prefs.isKey("lora_gw")) s_prefs.getString("lora_gw", g_settings.lora_gw, sizeof(g_settings.lora_gw));
     if (s_prefs.isKey("params")) {
         int32_t stored[TM_PARAM_COUNT];
         const size_t n = s_prefs.getBytes("params", stored, sizeof(stored));
@@ -114,6 +126,9 @@ bool tm_settings_save() {
     ok = s_prefs.putString("pass", g_settings.password) >= 0 && ok;
     ok = s_prefs.putString("key", g_settings.key) >= 0 && ok;
     ok = s_prefs.putString("edges", list) >= 0 && ok;
+    ok = s_prefs.putUShort("node_id", g_settings.node_id) == sizeof(uint16_t) && ok;
+    ok = s_prefs.putUChar("mode", g_settings.mode) == sizeof(uint8_t) && ok;
+    ok = s_prefs.putString("lora_gw", g_settings.lora_gw) >= 0 && ok;
     ok = s_prefs.putBytes("params", g_settings.params, sizeof(g_settings.params)) == sizeof(g_settings.params) && ok;
     return ok;
 }
@@ -157,6 +172,16 @@ static size_t s_len = 0;
 static void show() {
     // Secrets are never echoed: whether they are set, and the key's length,
     // is all anyone debugging a node needs.
+    uint8_t uid[6];
+    tm_transport_uid(uid);
+    // TMflash reads these `name : value` lines to verify a node after
+    // provisioning; keep the names stable.
+    Serial.printf("uid       : %02x:%02x:%02x:%02x:%02x:%02x\n", uid[0], uid[1], uid[2], uid[3], uid[4], uid[5]);
+    Serial.printf("fw        : %s\n", TM_FW_VERSION);
+    if (g_settings.node_id) Serial.printf("node_id   : %u\n", (unsigned) g_settings.node_id);
+    else Serial.println("node_id   : (unset)");
+    Serial.printf("mode      : %s\n", g_settings.mode == TM_MODE_LORA ? "lora" : "wifi");
+    Serial.printf("lora_gw   : %s\n", g_settings.lora_gw[0] ? g_settings.lora_gw : "(none)");
     Serial.printf("ssid      : %s\n", g_settings.ssid[0] ? g_settings.ssid : "(unset)");
     Serial.printf("password  : %s\n", g_settings.password[0] ? "(set)" : "(unset)");
     Serial.printf("edges     : %s %s\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)", g_settings.edges[1]);
@@ -173,7 +198,10 @@ static void help() {
         "  show                      settings (secrets are not printed)\n"
         "  set ssid <name>           Wi-Fi network (2.4 GHz)\n"
         "  set pass <password>\n"
-        "  set edges <ip>[,<ip>]     TMedge address(es)\n"
+        "  set edges <ip>[,<ip>]     where to send over Wi-Fi: TMWAccess or TMedge\n"
+        "  set id <1-65535>          node ID (a label; identity stays the MAC)\n"
+        "  set mode <wifi|lora>      uplink transport\n"
+        "  set lora_gw <ip>          TMLAccess address (LoRa mode)\n"
         "  set key <string>          shared signing key (TMedge TM_KEY)\n"
         "  param <name> <value>      detector/telemetry parameter, see `show`\n"
         "  save                      keep settings across reboots\n"
@@ -201,7 +229,38 @@ static uint8_t execute(char* line) {
     if (!strcmp(cmd, "set")) {
         char* what = strtok(NULL, " ");
         char* value = strtok(NULL, "");   // rest of line: SSIDs may contain spaces
-        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key> <value>"); return 0; }
+        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw> <value>"); return 0; }
+        if (!strcmp(what, "id")) {
+            char* end = NULL;
+            const long v = strtol(value, &end, 10);
+            if (end == value || *end || v < 1 || v > 65535) { Serial.println("invalid: id must be 1..65535"); return 0; }
+            g_settings.node_id = (uint16_t) v;
+            Serial.println("id updated (not saved)");
+            return 0;   // a label: nothing to restart
+        }
+        if (!strcmp(what, "mode")) {
+            if (!strcmp(value, "wifi")) g_settings.mode = TM_MODE_WIFI;
+            else if (!strcmp(value, "lora")) g_settings.mode = TM_MODE_LORA;
+            else { Serial.println("invalid: mode must be wifi or lora"); return 0; }
+            Serial.println("mode updated (not saved)");
+            return TM_CONSOLE_NETWORK_CHANGED;
+        }
+        if (!strcmp(what, "lora_gw")) {
+            if (!is_ipv4(value)) { Serial.println("invalid: lora_gw must be an IPv4 address"); return 0; }
+            strncpy(g_settings.lora_gw, value, sizeof(g_settings.lora_gw) - 1);
+            Serial.println("lora_gw updated (not saved)");
+            return 0;
+        }
+        if (!strcmp(what, "edges")) {
+            // Checked here too, so a typo is refused at the console instead of
+            // only being logged at the next boot.
+            char copy[64];
+            strncpy(copy, value, sizeof(copy) - 1);
+            copy[sizeof(copy) - 1] = 0;
+            for (char* t = strtok(copy, ", "); t; t = strtok(NULL, ", ")) {
+                if (!is_ipv4(t)) { Serial.printf("invalid: edge \"%s\" is not an IPv4 address\n", t); return 0; }
+            }
+        }
         if (!strcmp(what, "ssid")) strncpy(g_settings.ssid, value, sizeof(g_settings.ssid) - 1);
         else if (!strcmp(what, "pass")) strncpy(g_settings.password, value, sizeof(g_settings.password) - 1);
         else if (!strcmp(what, "key")) strncpy(g_settings.key, value, sizeof(g_settings.key) - 1);

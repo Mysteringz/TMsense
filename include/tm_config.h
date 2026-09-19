@@ -16,11 +16,14 @@
 
 #if defined(TM_HOST_TEST)
   // the host harness defines what it needs
+#elif defined(TM_NO_NODE_CONFIG)
+  // Release image (TMflash): no bench defaults baked in, so a binary handed
+  // around never carries a Wi-Fi password or key; TMflash provisions them.
 #elif __has_include("node_config.h")
   #include "node_config.h"
 #endif
 
-#define TM_FW_VERSION "tmnode-1.0.0"
+#define TM_FW_VERSION "tmsense-1.1"   // at most 12 chars: STATUS fw_version
 
 #ifndef TM_DEFAULT_SSID
   #define TM_DEFAULT_SSID ""
