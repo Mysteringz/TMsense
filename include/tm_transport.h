@@ -27,6 +27,10 @@ int tm_transport_send(const uint8_t* data, size_t len, bool all_edges);
 /** A pending downlink datagram, copied into buf; 0 if none. */
 size_t tm_transport_receive(uint8_t* buf, size_t max);
 
+/** Who sent the last datagram tm_transport_receive returned: the node's
+    gateway, and the only machine an OTA image may be fetched from. */
+void tm_transport_remote(uint8_t out[4]);
+
 void tm_transport_uid(uint8_t out[6]);
 int8_t tm_transport_rssi();
 uint8_t tm_transport_channel();

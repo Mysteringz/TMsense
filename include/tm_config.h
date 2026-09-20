@@ -23,7 +23,7 @@
   #include "node_config.h"
 #endif
 
-#define TM_FW_VERSION "tmsense-1.1"   // at most 12 chars: STATUS fw_version
+#define TM_FW_VERSION "tmsense-1.3"   // at most 12 chars: STATUS fw_version
 
 #ifndef TM_DEFAULT_SSID
   #define TM_DEFAULT_SSID ""

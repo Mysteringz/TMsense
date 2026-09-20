@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <string.h>
 #include <esp_mac.h>
 #include "tm_config.h"
 #include "tm_settings.h"
@@ -109,6 +110,8 @@ int tm_transport_send(const uint8_t* data, size_t len, bool all_edges) {
     return reached;
 }
 
+static uint8_t s_remote[4] = {0, 0, 0, 0};
+
 size_t tm_transport_receive(uint8_t* buf, size_t max) {
     if (!s_down_open) return 0;
     const int n = s_down.parsePacket();
@@ -117,8 +120,12 @@ size_t tm_transport_receive(uint8_t* buf, size_t max) {
         s_down.flush();
         return 0;
     }
+    const IPAddress from = s_down.remoteIP();
+    for (int i = 0; i < 4; ++i) s_remote[i] = from[i];
     return (size_t) s_down.read(buf, max);
 }
+
+void tm_transport_remote(uint8_t out[4]) { memcpy(out, s_remote, 4); }
 
 int8_t tm_transport_rssi() { return tm_transport_connected() ? (int8_t) WiFi.RSSI() : 0; }
 uint8_t tm_transport_channel() { return tm_transport_connected() ? (uint8_t) WiFi.channel() : 0; }

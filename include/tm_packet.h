@@ -48,6 +48,21 @@ typedef struct {
 } TmCommand;
 
 typedef struct {
+    uint32_t seq;            // replayed-command rule, shared with TmCommand
+    uint16_t port;
+    uint32_t size;
+    uint8_t sha256[32];
+    char path[TM_OTA_PATH_LEN];
+} TmOtaRequest;
+
+typedef struct {
+    uint8_t state;           // TM_OTA_*
+    uint8_t percent;
+    uint8_t error;           // TM_OTA_ERR_*
+    uint32_t image;          // first four bytes of the image SHA-256
+} TmOtaStatus;
+
+typedef struct {
     uint32_t frame;
     float ta;
     float scene_min;
@@ -66,8 +81,16 @@ size_t tm_build_raw(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_ms,
 size_t tm_build_status(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_ms,
                        const TmStatus* status, const int32_t* params, uint8_t param_count);
 
+size_t tm_build_ota_status(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_ms, const TmOtaStatus* st);
+
 /** Build a COMMAND (used by host tests; the edge has its own builder). */
 size_t tm_build_command(uint8_t* out, const TmPacketContext* ctx, const TmCommand* cmd);
+
+/** Build an OTA request (host tests; the edge has its own builder). */
+size_t tm_build_ota(uint8_t* out, const TmPacketContext* ctx, const TmOtaRequest* ota);
+
+/** Parse an OTA request addressed to this node. Same checks as a COMMAND. */
+int tm_parse_ota(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmOtaRequest* out);
 
 #define TM_PARSE_OK 0
 #define TM_PARSE_SHORT -1

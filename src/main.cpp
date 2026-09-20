@@ -13,6 +13,7 @@
 #include "tm_packet.h"
 #include "tm_protocol.h"
 #include "tm_sensor.h"
+#include "tm_ota.h"
 #include "tm_settings.h"
 #include "tm_transport.h"
 
@@ -20,7 +21,7 @@ static TmDetector s_detector;
 static TmPacketContext s_ctx;
 static float s_frame[TM_GRID_SIZE];
 static uint8_t s_packet[TM_PACKET_MAX_SIZE];
-static uint8_t s_rx[64];
+static uint8_t s_rx[TM_HEADER_SIZE + TM_OTA_SIZE + TM_TAG_SIZE];
 
 static bool s_sensor_ok = false;
 static uint32_t s_sensor_retry_ms = 0;
@@ -32,6 +33,17 @@ static float s_fps = 0.0f;
 static uint32_t s_last_status_ms = 0;
 static uint32_t s_identify_until_ms = 0;
 static uint8_t s_last_logged_count = 255;
+/** Set whenever a packet reached an edge; read once a second by the OTA probation check. */
+static bool s_uplink_ok = false;
+static uint32_t s_last_second_ms = 0;
+
+/** True once per second, for work that does not belong in the frame loop. */
+static bool now_ms_second_tick() {
+    const uint32_t now = millis();
+    if (now - s_last_second_ms < 1000) return false;
+    s_last_second_ms = now;
+    return true;
+}
 static uint32_t s_last_log_ms = 0;
 static uint32_t s_last_poll_ms = 0;
 
@@ -55,6 +67,28 @@ static void start_sensor() {
     Serial.printf("[sensor] MLX90640 %s\n", s_sensor_ok ? "ready" : "NOT FOUND (check SDA 41 / SCL 42)");
 }
 
+/** OTA progress goes out on the same signed uplink as everything else. */
+static void ota_report(const TmOtaStatus* st) {
+    const size_t n = tm_build_ota_status(s_packet, &s_ctx, millis(), st);
+    if (tm_transport_send(s_packet, n, true) > 0) s_uplink_ok = true;
+}
+
+static void handle_ota(const TmOtaRequest& req) {
+    // The same replay counter as commands: an old update request, replayed
+    // even after a reboot, does nothing.
+    if (req.seq <= g_settings.last_cmd) {
+        Serial.printf("[ota] stale request %lu ignored (last %lu)\n",
+                      (unsigned long) req.seq, (unsigned long) g_settings.last_cmd);
+        return;
+    }
+    g_settings.last_cmd = req.seq;
+    tm_settings_persist_last_cmd();
+    uint8_t gw[4];
+    tm_transport_remote(gw);
+    Serial.printf("[ota] update requested from %u.%u.%u.%u%s\n", gw[0], gw[1], gw[2], gw[3], req.path);
+    tm_ota_begin(&req, gw);
+}
+
 static void send_status() {
     TmStatus st;
     memset(&st, 0, sizeof(st));
@@ -76,7 +110,7 @@ static void send_status() {
                (s_detector.background_ready ? TM_STATUS_BACKGROUND_READY : 0) |
                (s_ctx.key_len > 0 ? TM_STATUS_SIGNED : 0);
     const size_t n = tm_build_status(s_packet, &s_ctx, millis(), &st, g_settings.params, TM_PARAM_COUNT);
-    tm_transport_send(s_packet, n, true);
+    if (tm_transport_send(s_packet, n, true) > 0) s_uplink_ok = true;
     s_last_status_ms = millis();
 }
 
@@ -206,6 +240,8 @@ void setup() {
 
     start_sensor();
     tm_transport_begin();
+    // After a flash this decides whether the new image keeps its place.
+    tm_ota_init(ota_report);
 }
 
 void loop() {
@@ -225,10 +261,27 @@ void loop() {
 
     const size_t rx = tm_transport_receive(s_rx, sizeof(s_rx));
     if (rx > 0) {
-        TmCommand cmd;
-        const int r = tm_parse_command(s_rx, rx, &s_ctx, &cmd);
-        if (r == TM_PARSE_OK) handle_command(cmd);
-        else Serial.printf("[cmd] rejected datagram (%d)\n", r);
+        if (rx > 3 && s_rx[3] == TM_TYPE_OTA) {
+            TmOtaRequest req;
+            const int r = tm_parse_ota(s_rx, rx, &s_ctx, &req);
+            if (r == TM_PARSE_OK) handle_ota(req);
+            else Serial.printf("[ota] rejected datagram (%d)\n", r);
+        } else {
+            TmCommand cmd;
+            const int r = tm_parse_command(s_rx, rx, &s_ctx, &cmd);
+            if (r == TM_PARSE_OK) handle_command(cmd);
+            else Serial.printf("[cmd] rejected datagram (%d)\n", r);
+        }
+    }
+
+    // Fetching an image blocks for a few seconds; the sensor waits.
+    if (tm_ota_busy()) {
+        tm_ota_update();
+        return;
+    }
+    if (now_ms_second_tick()) {
+        tm_ota_health(tm_transport_connected(), s_sensor_ok, s_uplink_ok);
+        s_uplink_ok = false;
     }
 
     const uint32_t now = millis();

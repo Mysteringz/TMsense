@@ -43,6 +43,19 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (argc >= 3 && !strcmp(argv[1], "parse-ota")) {
+        const char* hex = argv[2];
+        size_t n = strlen(hex) / 2;
+        for (size_t i = 0; i < n; ++i) sscanf(hex + 2 * i, "%2hhx", &buf[i]);
+        TmOtaRequest ota;
+        memset(&ota, 0, sizeof(ota));
+        const int r = tm_parse_ota(buf, n, &ctx, &ota);
+        printf("{\"result\":%d,\"seq\":%u,\"port\":%u,\"size\":%u,\"sha0\":\"%02x%02x%02x%02x\",\"path\":\"%s\"}\n",
+               r, (unsigned) ota.seq, (unsigned) ota.port, (unsigned) ota.size,
+               ota.sha256[0], ota.sha256[1], ota.sha256[2], ota.sha256[3], ota.path);
+        return 0;
+    }
+
     TmReportInfo info = {4242, 35.81f, 21.04f, 33.87f, 23.5f, TM_REPORT_BACKGROUND_READY};
     TmDetection dets[30];
     for (int i = 0; i < 30; ++i) {
@@ -79,8 +92,13 @@ int main(int argc, char** argv) {
     n = tm_build_status(buf, &ctx, 123460, &st, params, TM_PARAM_COUNT);
     hex_line("status", buf, n, "{\"seq\":104}");
 
+    TmOtaStatus ota_st = {TM_OTA_DOWNLOADING, 42, TM_OTA_ERR_NONE, 0x9f3a12c4u};
+    n = tm_build_ota_status(buf, &ctx, 123461, &ota_st);
+    hex_line("ota_status", buf, n, "{\"seq\":105,\"state\":\"downloading\",\"percent\":42,\"image\":\"c4123a9f\"}");
+
     ctx.key_len = 0;
+
     n = tm_build_report(buf, &ctx, 1, &info, dets, 1);
-    hex_line("report_unsigned", buf, n, "{\"seq\":105}");
+    hex_line("report_unsigned", buf, n, "{\"seq\":106}");
     return 0;
 }

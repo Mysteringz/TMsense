@@ -69,6 +69,20 @@ For bench work you can also bake in defaults: copy
 `include/node_config.example.h` to `include/node_config.h` (git-ignored).
 Settings saved in flash override these defaults.
 
+## Updating over the air
+
+From `tmsense-1.2` the node takes firmware updates from TMedge's console: it
+receives a signed request naming a port, a path and a SHA-256, downloads the
+image from the gateway that delivered the request, checks the hash, writes it
+to the spare app partition and reboots.
+
+A new image is then on probation for three minutes. It has to join Wi-Fi, read
+the sensor and get a packet accepted by the edge; if it cannot, the node sets
+the boot partition back to the image that was working and reboots. `src/tm_ota.cpp`.
+
+Progress is reported as OTA_STATUS packets, so a rollout can be watched from
+the console rather than guessed at.
+
 ## Detector
 
 `src/tm_detector.cpp` is written for small blobs. At 3-5 m with this lens, a

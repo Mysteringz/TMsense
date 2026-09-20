@@ -124,6 +124,39 @@
 #define TM_STATUS_BACKGROUND_READY 0x02
 #define TM_STATUS_SIGNED 0x04
 
+/**
+ * OTA_STATUS, node -> edge. Sent on every state change, and about every two
+ * seconds while downloading, so a rollout can be watched rather than guessed
+ * at.
+ *
+ *   0   state    uint8     TM_OTA_*
+ *   1   percent  uint8     0..100 while downloading
+ *   2   error    uint8     TM_OTA_ERR_*
+ *   3   reserved uint8
+ *   4   image    uint32    first four bytes of the image's SHA-256: which
+ *                          image this is about, and after a reboot, which one
+ *                          the node is actually running
+ */
+#define TM_TYPE_OTA_STATUS 0x04
+#define TM_OTA_STATUS_SIZE 8
+
+#define TM_OTA_IDLE 0
+#define TM_OTA_DOWNLOADING 1
+#define TM_OTA_VERIFYING 2
+#define TM_OTA_APPLYING 3
+#define TM_OTA_REBOOTING 4
+#define TM_OTA_CONFIRMED 5   // booted the new image and proved itself healthy
+#define TM_OTA_FAILED 6
+#define TM_OTA_REVERTED 7    // the new image did not come up; back on the old one
+
+#define TM_OTA_ERR_NONE 0
+#define TM_OTA_ERR_HTTP 1     // gateway unreachable, or not 200
+#define TM_OTA_ERR_SIZE 2     // fewer or more bytes than promised
+#define TM_OTA_ERR_SHA 3      // the image is not the one that was signed for
+#define TM_OTA_ERR_FLASH 4    // no OTA partition, or the write failed
+#define TM_OTA_ERR_NO_WIFI 5
+#define TM_OTA_ERR_BUSY 6     // an update is already running
+
 // --- Downlink (edge -> node) -------------------------------------------------
 
 /**
@@ -145,6 +178,25 @@
 #define TM_CMD_IDENTIFY 3         // blink the LED for `value` seconds
 #define TM_CMD_REBOOT 4
 #define TM_CMD_SAVE_PARAMS 5      // persist current params to flash
+
+/**
+ * OTA, edge -> node. "Fetch this image from your gateway and flash it."
+ *
+ * The node downloads from the address the packet arrived from -- its gateway,
+ * which is the only machine on its network it already trusts to reach -- so
+ * no URL, host name or DNS is involved. The SHA-256 is what makes the image
+ * safe: the packet carrying it is signed with the shared key, and the node
+ * refuses anything whose bytes do not hash to this.
+ *
+ *   0   cmd_seq  uint32    replay rule as COMMAND: must beat the last applied
+ *   4   port     uint16    HTTP port on the gateway
+ *   6   size     uint32    image bytes
+ *   10  sha256   uint8[32]
+ *   42  path     char[TM_OTA_PATH_LEN]  NUL-padded, e.g. "/fw/9f3a12....bin"
+ */
+#define TM_TYPE_OTA 0x11
+#define TM_OTA_PATH_LEN 48
+#define TM_OTA_SIZE (42 + TM_OTA_PATH_LEN)
 
 /**
  * Tunable parameters, by id. Values are int32 in the unit given. The order is

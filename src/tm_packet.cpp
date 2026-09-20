@@ -145,6 +145,58 @@ size_t tm_build_command(uint8_t* out, const TmPacketContext* ctx, const TmComman
     return seal(out, TM_COMMAND_SIZE, ctx->key, ctx->key_len);
 }
 
+size_t tm_build_ota_status(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_ms, const TmOtaStatus* st) {
+    write_header(out, TM_TYPE_OTA_STATUS, ctx->uid, ctx->boot, ctx->seq++, uptime_ms);
+    uint8_t* p = out + TM_HEADER_SIZE;
+    p[0] = st->state;
+    p[1] = st->percent;
+    p[2] = st->error;
+    p[3] = 0;
+    put32(p + 4, st->image);
+    return seal(out, TM_OTA_STATUS_SIZE, ctx->key, ctx->key_len);
+}
+
+size_t tm_build_ota(uint8_t* out, const TmPacketContext* ctx, const TmOtaRequest* ota) {
+    // The header's boot/seq/uptime are meaningless downlink; zero, as COMMAND.
+    write_header(out, TM_TYPE_OTA, ctx->uid, 0, 0, 0);
+    uint8_t* p = out + TM_HEADER_SIZE;
+    put32(p, ota->seq);
+    put16(p + 4, ota->port);
+    put32(p + 6, ota->size);
+    memcpy(p + 10, ota->sha256, 32);
+    memset(p + 42, 0, TM_OTA_PATH_LEN);
+    size_t path_len = 0;
+    while (path_len < TM_OTA_PATH_LEN && ota->path[path_len]) ++path_len;
+    memcpy(p + 42, ota->path, path_len);
+    return seal(out, TM_OTA_SIZE, ctx->key, ctx->key_len);
+}
+
+int tm_parse_ota(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmOtaRequest* out) {
+    if (len < TM_HEADER_SIZE + TM_TAG_SIZE) return TM_PARSE_SHORT;
+    if (in[0] != TM_MAGIC_0 || in[1] != TM_MAGIC_1) return TM_PARSE_MAGIC;
+    if (in[2] != TM_PROTOCOL_VERSION) return TM_PARSE_VERSION;
+    if (in[3] != TM_TYPE_OTA) return TM_PARSE_TYPE;
+    if (memcmp(in + 4, ctx->uid, TM_UID_SIZE) != 0) return TM_PARSE_NOT_FOR_US;
+    const uint16_t payload = get16(in + 20);
+    if (payload != TM_OTA_SIZE || len != (size_t) TM_HEADER_SIZE + payload + TM_TAG_SIZE) return TM_PARSE_LENGTH;
+    // Flashing is the most destructive thing a node can be told to do: an
+    // unsigned one is never even considered.
+    if (ctx->key_len == 0) return TM_PARSE_BAD_TAG;
+    uint8_t tag[TM_TAG_SIZE];
+    tm_auth_tag(ctx->key, ctx->key_len, in, TM_HEADER_SIZE + payload, tag);
+    uint8_t diff = 0;
+    for (int i = 0; i < TM_TAG_SIZE; ++i) diff |= (uint8_t) (tag[i] ^ in[TM_HEADER_SIZE + payload + i]);
+    if (diff != 0) return TM_PARSE_BAD_TAG;
+    const uint8_t* p = in + TM_HEADER_SIZE;
+    out->seq = get32(p);
+    out->port = get16(p + 4);
+    out->size = get32(p + 6);
+    memcpy(out->sha256, p + 10, 32);
+    memcpy(out->path, p + 42, TM_OTA_PATH_LEN);
+    out->path[TM_OTA_PATH_LEN - 1] = 0;
+    return TM_PARSE_OK;
+}
+
 int tm_parse_command(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmCommand* out) {
     if (len < TM_HEADER_SIZE + TM_TAG_SIZE) return TM_PARSE_SHORT;
     if (in[0] != TM_MAGIC_0 || in[1] != TM_MAGIC_1) return TM_PARSE_MAGIC;

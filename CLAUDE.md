@@ -37,6 +37,9 @@ TM_KEY=... python3 tools/listen.py --iface en0
   and the `<name> updated` / `saved` replies. Change both sides together.
 - **Never print the key or Wi-Fi password.** `show` reports only whether they
   are set.
+- **A new image must prove itself.** After an OTA the firmware confirms only
+  once Wi-Fi, the sensor and an accepted uplink all work; otherwise it puts the
+  previous image back. Never let a fresh image mark itself valid on boot.
 - **The boot counter is never reset** (not even by `factory`). Resetting it
   makes the node's packets look like replays to every edge.
 - **The detector never absorbs an accepted person into the background.** A
