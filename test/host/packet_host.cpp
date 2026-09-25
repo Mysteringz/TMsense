@@ -83,7 +83,10 @@ int main(int argc, char** argv) {
 
     TmStatus st;
     memset(&st, 0, sizeof(st));
-    strncpy(st.fw_version, "tmnode-9.9.9", sizeof(st.fw_version));
+    // Exactly 12 chars on purpose: a full-width field with no NUL is the
+    // edge case the wire format allows. memcpy, because GCC's
+    // -Wstringop-truncation (fatal under -Werror) flags strncpy doing this.
+    memcpy(st.fw_version, "tmnode-9.9.9", sizeof(st.fw_version));
     st.ip[0] = 192; st.ip[1] = 168; st.ip[2] = 0; st.ip[3] = 9;
     st.rssi = -57; st.channel = 10; st.free_heap = 238676; st.min_heap = 200000; st.stack_free = 5728;
     st.wifi_drops = 2; st.sensor_errors = 1; st.frames = 99999; st.fps_x100 = 98; st.vdd_x100 = 332;
