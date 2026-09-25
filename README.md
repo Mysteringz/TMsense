@@ -115,3 +115,12 @@ and drift. The C detector code runs on them unchanged.
 - Commands from the edge must be signed, addressed to this node's MAC, and
   newer than the last command applied. That check survives reboots.
 - The key is shared by every node on a site. See TMedge docs for rotation.
+
+## Continuous integration
+
+CI runs the packet harness, detector scenarios and a PlatformIO `tmflash`
+compile without bench secrets. The firmware artifact is retained for 30 days.
+Flashing remains an explicit pilot-first operation.
+
+Default-branch changes go through a pull request with required checks.
+GitHub Actions dependencies are pinned and updated through Dependabot PRs.
