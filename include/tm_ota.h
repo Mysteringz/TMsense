@@ -8,9 +8,17 @@
 /**
  * Over-the-air update.
  *
- * The edge sends a signed OTA request; the node fetches the image over plain
- * HTTP from the gateway that delivered the request -- the one machine on its
- * network it already talks to -- and writes it to the spare app partition.
+ * The edge sends a signed OTA request; the node fetches the image and writes
+ * it to the spare app partition. Where it fetches from depends on the
+ * transport the request came in on:
+ *
+ *   udp  plain HTTP from the gateway that delivered the request -- the one
+ *        machine on its network it already talks to (address + port + path).
+ *   wss  HTTPS from the node's own provisioned cloud host, on the cloud_url
+ *        port (443), path /fw/<build>.bin only, with the bearer token from an
+ *        `ota_grant` bound to the same sequence and build. Never a proxy's
+ *        address, never another host, never a redirect or plain HTTP.
+ *
  * Trust comes from the SHA-256 inside the signed request, not from the
  * transport: the gateway can serve whatever it likes, and a single wrong byte
  * fails the hash and the update is thrown away before it can boot.
@@ -36,6 +44,13 @@ void tm_ota_init(TmOtaReporter reporter);
  */
 void tm_ota_begin(const TmOtaRequest* req, const uint8_t gateway[4]);
 
+/**
+ * Start an update that arrived over the cloud session. `host`/`port` are the
+ * provisioned cloud_url's; the request must name that port and a
+ * /fw/<16 hex>.bin path, and a matching download grant must have arrived.
+ */
+void tm_ota_begin_cloud(const TmOtaRequest* req, const char* host, uint16_t port);
+
 /** True while an image is being fetched: the caller should pause its work. */
 bool tm_ota_busy();
 
@@ -46,6 +61,11 @@ void tm_ota_update();
  * Feed the health of the running image once a second after boot. While a
  * freshly flashed image is on probation this decides between confirming it
  * and rolling back; at all other times it does nothing.
+ *
+ * `uplink_ok` must be evidence the edge accepted something *this boot*: for
+ * wss, a new ACK for a REPORT this image generated -- never a socket write,
+ * a `ready`, a ping or an old ACK. (For udp it is still the older heuristic,
+ * a datagram that left the radio; UDP has no acknowledgement.)
  */
 void tm_ota_health(bool wifi_ok, bool sensor_ok, bool uplink_ok);
 
