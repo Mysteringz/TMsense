@@ -26,8 +26,14 @@ jobs:
         run: test/host/build_packet_host.sh
       - name: Detector scenarios
         run: python test/host/detector_test.py
+      # The direct-to-cloud transport's framing, control parser, URL rules,
+      # queue and session state machine, compiled from src/ unchanged.
+      - name: Cloud transport host tests
+        run: test/host/build_cloud_host.sh && build/cloud_test
       - name: Compile firmware without bench secrets
         run: pio run -e tmflash
+      - name: Compile the test-fixture build too (never released)
+        run: pio run -e tmsense_testcloud
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-${{ github.sha }}

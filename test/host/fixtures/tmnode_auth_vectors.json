@@ -1,0 +1,23 @@
+{
+  "comment": "tmnode.v1 auth vectors: mac = HMAC-SHA256(key, 'tmnode1|<uid>|<nonce>'), lowercase hex. Test keys only.",
+  "vectors": [
+    {
+      "key": "crosscheck-key",
+      "uid": "01:02:03:04:05:06",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mac": "bc8166cfd3596cd257bc8368371eec3a5fc0b12bb56dd8912842ca0f7a93e858"
+    },
+    {
+      "key": "crosscheck-key",
+      "uid": "30:ed:a0:cb:f5:f8",
+      "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "mac": "0574bd0736ccff6d4cdafd61fa21e13e104541de96cba39db87028b98065f21b"
+    },
+    {
+      "key": "previous-test-key",
+      "uid": "aa:bb:cc:dd:ee:ff",
+      "nonce": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "mac": "50064a57bd9023c82a2351eedb263aae188ec271419bd8df43c67c70bb36fbcc"
+    }
+  ]
+}

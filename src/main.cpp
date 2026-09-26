@@ -8,6 +8,7 @@
  */
 #include <Arduino.h>
 #include <esp_system.h>
+#include "tm_cloud.h"
 #include "tm_config.h"
 #include "tm_detector.h"
 #include "tm_packet.h"
@@ -33,8 +34,13 @@ static float s_fps = 0.0f;
 static uint32_t s_last_status_ms = 0;
 static uint32_t s_identify_until_ms = 0;
 static uint8_t s_last_logged_count = 255;
-/** Set whenever a packet reached an edge; read once a second by the OTA probation check. */
+/**
+ * udp: set whenever a datagram left for an edge -- UDP has no acknowledgement,
+ * so this is the most a udp node can know. Read once a second by the OTA
+ * probation check. wss uses the edge's ACKs instead (s_acked_seen).
+ */
 static bool s_uplink_ok = false;
+static uint32_t s_acked_seen = 0;
 static uint32_t s_last_second_ms = 0;
 
 /** True once per second, for work that does not belong in the frame loop. */
@@ -83,6 +89,15 @@ static void handle_ota(const TmOtaRequest& req) {
     }
     g_settings.last_cmd = req.seq;
     tm_settings_persist_last_cmd();
+    if (tm_transport_is_cloud()) {
+        // Over the cloud session the image comes from the provisioned host,
+        // never from wherever the packet seemed to come from.
+        TmCloudUrl url;
+        if (tm_cloud_parse_url(g_settings.cloud_url, TM_CLOUD_ALLOW_TEST_URL, &url) != TM_URL_OK) return;
+        Serial.printf("[ota] update requested: https://%s%s\n", url.host, req.path);
+        tm_ota_begin_cloud(&req, url.host, url.port);
+        return;
+    }
     uint8_t gw[4];
     tm_transport_remote(gw);
     Serial.printf("[ota] update requested from %u.%u.%u.%u%s\n", gw[0], gw[1], gw[2], gw[3], req.path);
@@ -211,6 +226,17 @@ static void process_frame() {
     }
 }
 
+/** `show` lines about the live uplink; before `boot`, which is where TMflash stops reading. */
+static void show_transport() {
+    char line[160];
+    tm_transport_describe(line, sizeof(line));
+    Serial.printf("uplink    : %s\n", line);
+    const int32_t age = tm_transport_report_ack_age_s();
+    if (age == -2) Serial.println("report_ack: n/a (udp has no acknowledgement)");
+    else if (age < 0) Serial.println("report_ack: never");
+    else Serial.printf("report_ack: %ld s ago\n", (long) age);
+}
+
 void setup() {
     Serial.begin(TM_SERIAL_BAUD);
     delay(200);
@@ -234,10 +260,15 @@ void setup() {
                   s_ctx.uid[2], s_ctx.uid[3], s_ctx.uid[4], s_ctx.uid[5], (unsigned) s_ctx.boot);
     if (g_settings.node_id) Serial.printf("[boot] node id %u\n", (unsigned) g_settings.node_id);
     Serial.printf("[boot] signing %s\n", s_ctx.key_len ? "on" : "OFF (no key; `set key ...`)");
-    Serial.printf("[boot] edges   %s %s -> udp/%d\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)",
-                  g_settings.edges[1], TM_UPLINK_PORT);
+    if (g_settings.transport == TM_TRANSPORT_WSS) {
+        Serial.printf("[boot] uplink  wss -> %s\n", g_settings.cloud_url);
+    } else {
+        Serial.printf("[boot] edges   %s %s -> udp/%d\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)",
+                      g_settings.edges[1], TM_UPLINK_PORT);
+    }
     Serial.println("[boot] type `help` for the console");
 
+    tm_console_set_transport_reporter(show_transport);
     start_sensor();
     tm_transport_begin();
     // After a flash this decides whether the new image keeps its place.
@@ -280,9 +311,19 @@ void loop() {
         return;
     }
     if (now_ms_second_tick()) {
-        tm_ota_health(tm_transport_connected(), s_sensor_ok, s_uplink_ok);
+        if (tm_transport_is_cloud()) {
+            // Only a new ACK for a REPORT this boot generated counts: not a
+            // socket write, not `ready`, not a ping, not an old ACK.
+            const uint32_t acked = tm_transport_reports_acked();
+            tm_ota_health(tm_transport_uplink_ready(), s_sensor_ok, acked > s_acked_seen);
+            s_acked_seen = acked;
+        } else {
+            tm_ota_health(tm_transport_connected(), s_sensor_ok, s_uplink_ok);
+        }
         s_uplink_ok = false;
     }
+    // A new cloud session starts with a STATUS built now, not an old one resent.
+    if (tm_cloud_take_status_request()) send_status();
 
     const uint32_t now = millis();
     if (!s_sensor_ok) {

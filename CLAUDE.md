@@ -10,7 +10,12 @@ src/tm_packet.cpp          builds/parses it, HMAC tag (mbedTLS; host shim in tes
 src/tm_detector.cpp        person detector (plain C, host-testable)
 src/tm_sensor.cpp          MLX90640, non-blocking subpage acquisition
 src/tm_settings.cpp        settings in flash + serial console
-src/tm_transport.cpp       Wi-Fi UDP up (5200) / down (5201)
+src/tm_transport.cpp       uplink manager: Wi-Fi, then UDP up (5200) / down (5201) or the cloud
+src/tm_cloud.cpp           transport wss: network task, TLS (+ date check), queues (Arduino)
+src/tm_cloud_session.cpp   tmnode.v1 session state machine (plain C, host-tested)
+src/tm_cloud_proto.cpp     URL rules, control JSON, auth proof, ACK tracker, queue (host-tested)
+src/tm_ws.cpp              RFC 6455 client framing (host-tested)
+include/tm_ca_roots.h      trust roots for the cloud endpoint -- tools/update_ca_roots.sh
 src/main.cpp               loop
 src/MLX90640_*             Melexis driver (vendor code, with fixes; keep changes minimal)
 ```
@@ -20,6 +25,7 @@ src/MLX90640_*             Melexis driver (vendor code, with fixes; keep changes
 ```bash
 tools/build.sh [upload [port]]           # arduino-cli build / flash
 python3 test/host/detector_test.py       # must pass after any detector change
+test/host/build_cloud_host.sh && build/cloud_test   # direct-cloud transport host tests
 TM_KEY=... python3 tools/listen.py --iface en0
 ```
 
@@ -45,6 +51,14 @@ TM_KEY=... python3 tools/listen.py --iface en0
 - **The detector never absorbs an accepted person into the background.** A
   student sitting still for two hours is still there.
 - **Buffers over ~1 kB are static**, not on the 8 kB loop-task stack.
+- **transport wss never trusts less.** Certificates are always verified,
+  dates included (the core's mbedTLS skips them; tm_cloud.cpp does not); no
+  clock means no connection, and nothing falls back to WAN UDP. Only
+  `env:tmsense_testcloud`, never released, relaxes the URL rules.
+- **An ACK is the only proof of the cloud uplink.** OTA probation over wss
+  needs a new ACK for a REPORT from this boot -- not a socket write, `ready`,
+  a ping or an old ACK. The protocol is TMedge/docs/DIRECT_NODE_PROTOCOL.md.
+- **Flashing never migrates a node.** No `transport` in NVS means udp.
 - Detector changes need a scenario in `detector_test.py` that fails without
   them.
 
