@@ -146,7 +146,9 @@ static void command(char* line) {
     if (!strcmp(cmd, "status")) {
         TmStatus st;
         memset(&st, 0, sizeof(st));
-        strncpy(st.fw_version, "tmsense-host", sizeof(st.fw_version));
+        // memcpy, as packet_host does: a full 12-char field with no NUL is
+        // valid, and GCC's -Wstringop-truncation (fatal here) flags strncpy.
+        memcpy(st.fw_version, "tmsense-host", sizeof(st.fw_version));
         st.frames = 1;
         st.fps_x100 = 100;
         st.flags = TM_STATUS_SENSOR_OK | TM_STATUS_SIGNED;
