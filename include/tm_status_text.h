@@ -29,7 +29,7 @@ typedef struct {
     bool key_set;
     bool cloud;                // transport wss
     bool time_ok;              // wss only: a clock good enough to check certificates
-    char uplink[24];           // wss: session state or its last error; udp: first edge
+    char uplink[48];           // wss: session state or its last error (as long as last_error); udp: first edge
     int32_t ack_age_s;         // wss: seconds since the edge acknowledged a REPORT; -1 never
 } TmBootStatus;
 
