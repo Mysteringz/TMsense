@@ -11,6 +11,8 @@
 #include "tm_cloud.h"
 #include "tm_config.h"
 #include "tm_detector.h"
+#include "tm_display.h"
+#include "tm_status_text.h"
 #include "tm_packet.h"
 #include "tm_protocol.h"
 #include "tm_sensor.h"
@@ -51,6 +53,16 @@ static bool now_ms_second_tick() {
     return true;
 }
 static uint32_t s_last_log_ms = 0;
+
+// The start-up display. STARTUP: logo, then status until healthy; WAKE: a
+// minute on request; OFF: asleep.
+enum { DISPLAY_STARTUP, DISPLAY_WAKE, DISPLAY_OFF };
+static uint8_t s_display_mode = DISPLAY_OFF;
+static uint32_t s_display_since_ms = 0;
+static uint32_t s_display_tick_ms = 0;
+static uint32_t s_healthy_since_ms = 0;
+static bool s_have_scene = false;
+static float s_scene_min = 0.0f, s_scene_max = 0.0f;
 static uint32_t s_last_poll_ms = 0;
 
 static void apply_params() {
@@ -190,6 +202,9 @@ static void process_frame() {
         if (s_frame[i] < info.scene_min) info.scene_min = s_frame[i];
         if (s_frame[i] > info.scene_max) info.scene_max = s_frame[i];
     }
+    s_scene_min = info.scene_min;
+    s_scene_max = info.scene_max;
+    s_have_scene = true;
     info.bg_mean = s_detector.background_ready ? tm_detector_background_mean(&s_detector) : 0.0f;
     info.flags = (s_detector.background_ready ? TM_REPORT_BACKGROUND_READY : 0) |
                  (s_detector.global_shift ? TM_REPORT_GLOBAL_SHIFT : 0) |
@@ -226,6 +241,97 @@ static void process_frame() {
     }
 }
 
+static void display_wake(uint32_t now) {
+    if (!tm_display_present()) return;
+    tm_display_power(true);
+    s_display_mode = DISPLAY_WAKE;
+    s_display_since_ms = now;
+    s_display_tick_ms = 0;
+}
+
+/** Once a second while the display is on: what the node needs, and whether it has it. */
+static void display_tick(uint32_t now) {
+    if (!tm_display_present()) return;
+    // PRG: show the status for a minute, e.g. for someone checking a node on
+    // a ladder. On the press itself (debounced), so every press restarts the
+    // minute and a held button does not keep it on for ever.
+    static bool s_was_down = false;
+    static uint32_t s_press_ms = 0;
+    const bool down = digitalRead(TM_PIN_BUTTON) == LOW;
+    if (down && !s_was_down && now - s_press_ms > 200) {
+        s_press_ms = now;
+        if (s_display_mode != DISPLAY_STARTUP) {
+            Serial.println("[display] PRG pressed: status on for 60 s");
+            display_wake(now);
+        }
+    }
+    s_was_down = down;
+    if (s_display_mode == DISPLAY_OFF) return;
+    if (s_display_mode == DISPLAY_STARTUP && now - s_display_since_ms < TM_DISPLAY_LOGO_MS) return;
+    if (s_display_tick_ms && now - s_display_tick_ms < 1000) return;
+    s_display_tick_ms = now;
+
+    TmBootStatus st;
+    memset(&st, 0, sizeof(st));
+    strncpy(st.fw, TM_FW_VERSION, sizeof(st.fw) - 1);
+    st.node_id = g_settings.node_id;
+    memcpy(st.uid, s_ctx.uid, 6);
+    st.sensor_ok = s_sensor_ok;
+    st.have_scene = s_have_scene && s_sensor_ok;
+    st.scene_min = s_scene_min;
+    st.scene_max = s_scene_max;
+    st.ssid_set = g_settings.ssid[0] != 0;
+    st.wifi_joined = tm_transport_connected();
+    strncpy(st.ssid, g_settings.ssid, sizeof(st.ssid) - 1);
+    st.rssi = tm_transport_rssi();
+    st.key_set = s_ctx.key_len > 0;
+    st.cloud = tm_transport_is_cloud();
+    if (st.cloud) {
+        TmCloudInfo info;
+        tm_cloud_info(&info);
+        st.time_ok = tm_cloud_time_ok();
+        // While it is retrying, why it failed is what the installer needs.
+        strncpy(st.uplink, info.state == TM_CLOUD_BACKOFF && info.last_error[0] ? info.last_error
+                                                                                 : tm_cloud_state_name(info.state),
+                sizeof(st.uplink) - 1);
+        st.ack_age_s = tm_transport_report_ack_age_s();
+    } else {
+        strncpy(st.uplink, g_settings.edges[0], sizeof(st.uplink) - 1);
+        st.ack_age_s = -1;
+    }
+
+    int32_t off_in = -1;
+    if (s_display_mode == DISPLAY_STARTUP) {
+        if (tm_status_healthy(&st)) {
+            if (!s_healthy_since_ms) s_healthy_since_ms = now;
+            const uint32_t held = now - s_healthy_since_ms;
+            if (held >= TM_DISPLAY_HOLD_MS) {
+                Serial.println("[display] every service is up; display off (PRG or `display` to see it again)");
+                tm_display_power(false);
+                s_display_mode = DISPLAY_OFF;
+                return;
+            }
+            off_in = (int32_t) ((TM_DISPLAY_HOLD_MS - held + 999) / 1000);
+        } else {
+            s_healthy_since_ms = 0;
+        }
+        if (now - s_display_since_ms > TM_DISPLAY_STARTUP_MAX_MS) {
+            Serial.println("[display] not every service is up after 10 min; display off anyway to save power");
+            tm_display_power(false);
+            s_display_mode = DISPLAY_OFF;
+            return;
+        }
+    } else if (now - s_display_since_ms > TM_DISPLAY_WAKE_MS) {
+        tm_display_power(false);
+        s_display_mode = DISPLAY_OFF;
+        return;
+    }
+
+    char lines[TM_STATUS_LINES][TM_STATUS_COLS + 1];
+    tm_status_render(&st, off_in, lines);
+    tm_display_status(lines);
+}
+
 /** `show` lines about the live uplink; before `boot`, which is where TMflash stops reading. */
 static void show_transport() {
     char line[160];
@@ -240,6 +346,13 @@ static void show_transport() {
 void setup() {
     Serial.begin(TM_SERIAL_BAUD);
     delay(200);
+    pinMode(TM_PIN_BUTTON, INPUT_PULLUP);
+    // The splash first: the first thing anyone at the node sees is that it is alive.
+    if (tm_display_begin()) {
+        tm_display_logo();
+        s_display_mode = DISPLAY_STARTUP;
+        s_display_since_ms = millis();
+    }
     pinMode(TM_PIN_LED, OUTPUT);
     digitalWrite(TM_PIN_LED, LOW);
 
@@ -266,6 +379,8 @@ void setup() {
         Serial.printf("[boot] edges   %s %s -> udp/%d\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)",
                       g_settings.edges[1], TM_UPLINK_PORT);
     }
+    Serial.printf("[boot] display %s\n", tm_display_present() ? "OLED found: logo, then status until every service is up"
+                                                             : "none found (no OLED at 0x3C)");
     Serial.println("[boot] type `help` for the console");
 
     tm_console_set_transport_reporter(show_transport);
@@ -283,6 +398,7 @@ void loop() {
         tm_sensor_set_refresh((uint8_t) g_settings.params[TM_PARAM_REFRESH]);
     }
     if (actions & TM_CONSOLE_RESET_BG) tm_detector_reset_background(&s_detector);
+    if (actions & TM_CONSOLE_DISPLAY) display_wake(millis());
     if (actions & TM_CONSOLE_NETWORK_CHANGED) {
         load_key();
         tm_transport_restart();
@@ -304,6 +420,8 @@ void loop() {
             else Serial.printf("[cmd] rejected datagram (%d)\n", r);
         }
     }
+
+    display_tick(millis());
 
     // Fetching an image blocks for a few seconds; the sensor waits.
     if (tm_ota_busy()) {

@@ -66,6 +66,7 @@ const char* tm_param_name(uint8_t id);
 #define TM_CONSOLE_RESET_BG 0x02
 #define TM_CONSOLE_NETWORK_CHANGED 0x04
 #define TM_CONSOLE_REBOOT 0x08
+#define TM_CONSOLE_DISPLAY 0x10
 uint8_t tm_console_poll();
 
 /** Filled in by main: one line each for `show` about the uplink's live state. */

@@ -23,7 +23,7 @@
   #include "node_config.h"
 #endif
 
-#define TM_FW_VERSION "tmsense-1.4"   // at most 12 chars: STATUS fw_version
+#define TM_FW_VERSION "tmsense-1.5"   // at most 12 chars: STATUS fw_version
 
 #ifndef TM_DEFAULT_SSID
   #define TM_DEFAULT_SSID ""
@@ -53,6 +53,21 @@
 #define TM_PIN_SDA 41
 #define TM_PIN_SCL 42
 #define TM_PIN_LED 35
+// The on-board OLED has its own I2C bus; the PRG button wakes it.
+#define TM_PIN_OLED_SDA 17
+#define TM_PIN_OLED_SCL 18
+#define TM_PIN_OLED_RST 21
+#define TM_PIN_VEXT 36
+#define TM_PIN_BUTTON 0
+
+// Start-up display: the logo, then status until every critical service has
+// been healthy for TM_DISPLAY_HOLD_MS; then the panel sleeps. A node that is
+// never healthy still sleeps after TM_DISPLAY_STARTUP_MAX_MS. PRG or the
+// `display` command shows it again for TM_DISPLAY_WAKE_MS.
+#define TM_DISPLAY_LOGO_MS 2500
+#define TM_DISPLAY_HOLD_MS 10000
+#define TM_DISPLAY_STARTUP_MAX_MS 600000
+#define TM_DISPLAY_WAKE_MS 60000
 #define TM_I2C_HZ 1000000
 
 #endif // TM_CONFIG_H
