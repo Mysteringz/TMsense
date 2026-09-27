@@ -8,7 +8,9 @@
  * run `npm run crosscheck` in TMedge, which parses bytes produced by this
  * firmware's own serializer compiled on the host.
  *
- * Every packet, uplink or downlink, is one datagram:
+ * Every packet, uplink or downlink, is one datagram -- or, over the direct
+ * cloud transport (tm_cloud_session.h), one binary WebSocket message holding
+ * exactly the same bytes:
  *
  *   0   'T' 'M'            magic
  *   2   version (1)
@@ -180,13 +182,24 @@
 #define TM_CMD_SAVE_PARAMS 5      // persist current params to flash
 
 /**
- * OTA, edge -> node. "Fetch this image from your gateway and flash it."
+ * OTA, edge -> node. "Fetch this image and flash it."
  *
- * The node downloads from the address the packet arrived from -- its gateway,
- * which is the only machine on its network it already trusts to reach -- so
- * no URL, host name or DNS is involved. The SHA-256 is what makes the image
- * safe: the packet carrying it is signed with the shared key, and the node
- * refuses anything whose bytes do not hash to this.
+ * Where from depends on the transport the packet arrived on; the bytes do
+ * not change (this is a transport semantic, not a new packet version):
+ *
+ *   udp  from the address the packet arrived from -- its gateway, the only
+ *        machine on its network it already trusts to reach -- at `port` and
+ *        `path`. No URL, host name or DNS is involved.
+ *   wss  (tmnode.v1, TMedge/docs/DIRECT_NODE_PROTOCOL.md) over HTTPS from the
+ *        node's own provisioned cloud_url host. `port` must equal that URL's
+ *        port (443) and `path` must be /fw/<16 hex>.bin; the node also needs
+ *        the `ota_grant` control message for this very cmd_seq and build,
+ *        whose bearer token the edge requires. Never the proxy's address,
+ *        another host, a redirect or plain HTTP.
+ *
+ * Either way the SHA-256 is what makes the image safe: the packet carrying it
+ * is signed with the shared key, and the node refuses anything whose bytes do
+ * not hash to this.
  *
  *   0   cmd_seq  uint32    replay rule as COMMAND: must beat the last applied
  *   4   port     uint16    HTTP port on the gateway

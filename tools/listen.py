@@ -6,6 +6,8 @@
 
 Independent of TMedge on purpose, so a node can be checked with nothing but
 Python. It mirrors include/tm_protocol.h; if that changes, change this too.
+It hears only `transport udp` nodes: a `transport wss` node sends the same
+bytes, but inside a TLS WebSocket to TMedge (tmnode.v1), not to this port.
 On a Mac whose VPN blocks the LAN, pass --iface en0 (see bind_to_interface).
 """
 import argparse, hashlib, hmac, json, os, socket, struct, sys, time

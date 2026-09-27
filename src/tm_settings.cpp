@@ -76,6 +76,7 @@ static void load_defaults() {
     strncpy(g_settings.key, TM_DEFAULT_KEY, sizeof(g_settings.key) - 1);
     parse_edges(TM_DEFAULT_EDGES);
     g_settings.mode = TM_MODE_WIFI;
+    g_settings.transport = TM_TRANSPORT_UDP;
     default_params(g_settings.params);
 }
 
@@ -99,6 +100,16 @@ void tm_settings_begin() {
     const uint8_t mode = s_prefs.getUChar("mode", TM_MODE_WIFI);
     g_settings.mode = mode == TM_MODE_LORA ? TM_MODE_LORA : TM_MODE_WIFI;
     if (s_prefs.isKey("lora_gw")) s_prefs.getString("lora_gw", g_settings.lora_gw, sizeof(g_settings.lora_gw));
+    // Absent on every node provisioned before this firmware: they stay udp.
+    if (s_prefs.isKey("cloud_url")) s_prefs.getString("cloud_url", g_settings.cloud_url, sizeof(g_settings.cloud_url));
+    const uint8_t transport = s_prefs.getUChar("transport", TM_TRANSPORT_UDP);
+    TmCloudUrl url;
+    // A stored wss that no longer validates (or a LoRa node) falls back to
+    // udp rather than trying to connect somewhere it should not.
+    g_settings.transport = transport == TM_TRANSPORT_WSS && g_settings.mode == TM_MODE_WIFI &&
+                                   tm_cloud_parse_url(g_settings.cloud_url, TM_CLOUD_ALLOW_TEST_URL, &url) == TM_URL_OK
+                               ? TM_TRANSPORT_WSS
+                               : TM_TRANSPORT_UDP;
     if (s_prefs.isKey("params")) {
         int32_t stored[TM_PARAM_COUNT];
         const size_t n = s_prefs.getBytes("params", stored, sizeof(stored));
@@ -129,6 +140,8 @@ bool tm_settings_save() {
     ok = s_prefs.putUShort("node_id", g_settings.node_id) == sizeof(uint16_t) && ok;
     ok = s_prefs.putUChar("mode", g_settings.mode) == sizeof(uint8_t) && ok;
     ok = s_prefs.putString("lora_gw", g_settings.lora_gw) >= 0 && ok;
+    ok = s_prefs.putUChar("transport", g_settings.transport) == sizeof(uint8_t) && ok;
+    ok = s_prefs.putString("cloud_url", g_settings.cloud_url) >= 0 && ok;
     ok = s_prefs.putBytes("params", g_settings.params, sizeof(g_settings.params)) == sizeof(g_settings.params) && ok;
     return ok;
 }
@@ -166,8 +179,13 @@ void tm_settings_to_detector(TmDetectorParams* out) {
 
 // --- Serial console ----------------------------------------------------------
 
+// "set cloud_url " + a 128-byte URL is 142; room to spare, and still small.
 static char s_line[160];
 static size_t s_len = 0;
+static bool s_discarding = false;
+static TmShowTransport s_show_transport = NULL;
+
+void tm_console_set_transport_reporter(TmShowTransport fn) { s_show_transport = fn; }
 
 static void show() {
     // Secrets are never echoed: whether they are set, and the key's length,
@@ -186,6 +204,11 @@ static void show() {
     Serial.printf("password  : %s\n", g_settings.password[0] ? "(set)" : "(unset)");
     Serial.printf("edges     : %s %s\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)", g_settings.edges[1]);
     Serial.printf("key       : %s\n", g_settings.key[0] ? "(set)" : "(unset - telemetry unsigned)");
+    // New fields go before `boot`: TMflash stops reading `show` at that line.
+    Serial.printf("transport : %s\n", g_settings.transport == TM_TRANSPORT_WSS ? "wss" : "udp");
+    Serial.printf("cloud_url : %s\n", g_settings.cloud_url[0] ? g_settings.cloud_url : "(none)");
+    Serial.printf("caps      : %s\n", TM_CAPABILITIES);
+    if (s_show_transport) s_show_transport();
     Serial.printf("boot      : %u   last_cmd: %lu\n", (unsigned) g_settings.boot, (unsigned long) g_settings.last_cmd);
     for (uint8_t i = 0; i < TM_PARAM_COUNT; ++i) {
         Serial.printf("param %-12s = %ld %s\n", SPECS[i].name, (long) g_settings.params[i], SPECS[i].unit);
@@ -200,7 +223,9 @@ static void help() {
         "  set pass <password>\n"
         "  set edges <ip>[,<ip>]     where to send over Wi-Fi: TMWAccess or TMedge\n"
         "  set id <1-65535>          node ID (a label; identity stays the MAC)\n"
-        "  set mode <wifi|lora>      uplink transport\n"
+        "  set mode <wifi|lora>      radio\n"
+        "  set cloud_url <wss://...> cloud endpoint for transport wss (TMedge node listener)\n"
+        "  set transport <udp|wss>   udp: to `edges`; wss: straight to `cloud_url`\n"
         "  set lora_gw <ip>          TMLAccess address (LoRa mode)\n"
         "  set key <string>          shared signing key (TMedge TM_KEY)\n"
         "  param <name> <value>      detector/telemetry parameter, see `show`\n"
@@ -229,7 +254,34 @@ static uint8_t execute(char* line) {
     if (!strcmp(cmd, "set")) {
         char* what = strtok(NULL, " ");
         char* value = strtok(NULL, "");   // rest of line: SSIDs may contain spaces
-        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw> <value>"); return 0; }
+        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw|cloud_url|transport> <value>"); return 0; }
+        if (!strcmp(what, "cloud_url")) {
+            TmCloudUrl url;
+            const int r = tm_cloud_parse_url(value, TM_CLOUD_ALLOW_TEST_URL, &url);
+            if (r != TM_URL_OK) { Serial.printf("invalid: %s\n", tm_cloud_url_error(r)); return 0; }
+            strncpy(g_settings.cloud_url, value, sizeof(g_settings.cloud_url) - 1);
+            g_settings.cloud_url[sizeof(g_settings.cloud_url) - 1] = 0;
+            Serial.println("cloud_url updated (not saved)");
+            return g_settings.transport == TM_TRANSPORT_WSS ? TM_CONSOLE_NETWORK_CHANGED : 0;
+        }
+        if (!strcmp(what, "transport")) {
+            if (!strcmp(value, "udp")) {
+                g_settings.transport = TM_TRANSPORT_UDP;
+            } else if (!strcmp(value, "wss")) {
+                TmCloudUrl url;
+                if (g_settings.mode != TM_MODE_WIFI) { Serial.println("invalid: transport wss needs mode wifi"); return 0; }
+                if (tm_cloud_parse_url(g_settings.cloud_url, TM_CLOUD_ALLOW_TEST_URL, &url) != TM_URL_OK) {
+                    Serial.println("invalid: set cloud_url first");
+                    return 0;
+                }
+                g_settings.transport = TM_TRANSPORT_WSS;
+            } else {
+                Serial.println("invalid: transport must be udp or wss");
+                return 0;
+            }
+            Serial.println("transport updated (not saved)");
+            return TM_CONSOLE_NETWORK_CHANGED;
+        }
         if (!strcmp(what, "id")) {
             char* end = NULL;
             const long v = strtol(value, &end, 10);
@@ -240,7 +292,10 @@ static uint8_t execute(char* line) {
         }
         if (!strcmp(what, "mode")) {
             if (!strcmp(value, "wifi")) g_settings.mode = TM_MODE_WIFI;
-            else if (!strcmp(value, "lora")) g_settings.mode = TM_MODE_LORA;
+            else if (!strcmp(value, "lora") && g_settings.transport == TM_TRANSPORT_WSS) {
+                Serial.println("invalid: LoRa has no wss transport; `set transport udp` first");
+                return 0;
+            } else if (!strcmp(value, "lora")) g_settings.mode = TM_MODE_LORA;
             else { Serial.println("invalid: mode must be wifi or lora"); return 0; }
             Serial.println("mode updated (not saved)");
             return TM_CONSOLE_NETWORK_CHANGED;
@@ -297,12 +352,18 @@ uint8_t tm_console_poll() {
         if (c == '\r') continue;
         if (c == '\n') {
             s_line[s_len] = '\0';
-            if (s_len > 0) actions |= execute(s_line);
+            if (s_len > 0 && !s_discarding) actions |= execute(s_line);
             s_len = 0;
+            s_discarding = false;
+        } else if (s_discarding) {
+            // Still inside an overlong line: its tail is not a command.
         } else if (s_len < sizeof(s_line) - 1) {
             s_line[s_len++] = (char) c;
         } else {
-            s_len = 0;   // overlong line: drop it rather than act on half of it
+            // Drop the whole line, through its newline. Acting on the tail
+            // would run whatever happened to follow the first 159 bytes.
+            s_len = 0;
+            s_discarding = true;
             Serial.println("line too long, ignored");
         }
     }
