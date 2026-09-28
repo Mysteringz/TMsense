@@ -231,6 +231,7 @@ static void help() {
         "  param <name> <value>      detector/telemetry parameter, see `show`\n"
         "  save                      keep settings across reboots\n"
         "  reset-bg                  relearn the background\n"
+        "  display                   show the status screen for a minute\n"
         "  factory                   erase saved settings\n"
         "  reboot");
 }
@@ -245,6 +246,7 @@ static uint8_t execute(char* line) {
         return 0;
     }
     if (!strcmp(cmd, "reboot")) return TM_CONSOLE_REBOOT;
+    if (!strcmp(cmd, "display")) { Serial.println("display on for 60 s"); return TM_CONSOLE_DISPLAY; }
     if (!strcmp(cmd, "reset-bg")) { Serial.println("relearning background"); return TM_CONSOLE_RESET_BG; }
     if (!strcmp(cmd, "factory")) {
         tm_settings_factory_reset();

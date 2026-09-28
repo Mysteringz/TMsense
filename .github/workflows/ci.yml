@@ -29,7 +29,7 @@ jobs:
       # The direct-to-cloud transport's framing, control parser, URL rules,
       # queue and session state machine, compiled from src/ unchanged.
       - name: Cloud transport host tests
-        run: test/host/build_cloud_host.sh && build/cloud_test
+        run: test/host/build_cloud_host.sh && build/cloud_test && build/display_test
       - name: Compile firmware without bench secrets
         run: pio run -e tmflash
       - name: Compile the test-fixture build too (never released)

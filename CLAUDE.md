@@ -16,6 +16,9 @@ src/tm_cloud_session.cpp   tmnode.v1 session state machine (plain C, host-tested
 src/tm_cloud_proto.cpp     URL rules, control JSON, auth proof, ACK tracker, queue (host-tested)
 src/tm_ws.cpp              RFC 6455 client framing (host-tested)
 include/tm_ca_roots.h      trust roots for the cloud endpoint -- tools/update_ca_roots.sh
+src/tm_display.cpp         on-board OLED (Wire1, SDA 17 / SCL 18): splash, status, sleep
+src/tm_status_text.cpp     the status lines and the "may go dark" rule (host-tested)
+include/tm_display_assets.h  font + HKUMySeat logo -- tools/make_display_assets.py
 src/main.cpp               loop
 src/MLX90640_*             Melexis driver (vendor code, with fixes; keep changes minimal)
 ```
@@ -25,7 +28,7 @@ src/MLX90640_*             Melexis driver (vendor code, with fixes; keep changes
 ```bash
 tools/build.sh [upload [port]]           # arduino-cli build / flash
 python3 test/host/detector_test.py       # must pass after any detector change
-test/host/build_cloud_host.sh && build/cloud_test   # direct-cloud transport host tests
+test/host/build_cloud_host.sh && build/cloud_test && build/display_test   # transport + display host tests
 TM_KEY=... python3 tools/listen.py --iface en0
 ```
 
@@ -59,6 +62,10 @@ TM_KEY=... python3 tools/listen.py --iface en0
   needs a new ACK for a REPORT from this boot -- not a socket write, `ready`,
   a ping or an old ACK. The protocol is TMedge/docs/DIRECT_NODE_PROTOCOL.md.
 - **Flashing never migrates a node.** No `transport` in NVS means udp.
+- **The display is for start-up and on request, never all day.** It sleeps
+  once every critical service has been healthy for 10 s (or after 10 min
+  regardless); PRG or `display` wakes it for a minute. Vext is never switched
+  off: the sensor may share the rail.
 - Detector changes need a scenario in `detector_test.py` that fails without
   them.
 

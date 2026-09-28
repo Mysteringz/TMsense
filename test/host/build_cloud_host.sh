@@ -13,6 +13,8 @@ LIBS=()
 SRC=("$ROOT/src/tm_ws.cpp" "$ROOT/src/tm_cloud_proto.cpp" "$ROOT/src/tm_cloud_session.cpp" "$ROOT/src/tm_packet.cpp" "$ROOT/src/tm_detector.cpp")
 FLAGS=(-std=c++17 -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations -DTM_HOST_TEST -I"$ROOT/test/host" -I"$ROOT/include")
 g++ "${FLAGS[@]}" "$ROOT/test/host/cloud_test.cpp" "${SRC[@]}" -o "$OUT/cloud_test" ${LIBS[@]+"${LIBS[@]}"}
+# The start-up display's text and its "may go dark" rule.
+g++ "${FLAGS[@]}" "$ROOT/test/host/display_test.cpp" "$ROOT/src/tm_status_text.cpp" -o "$OUT/display_test"
 if [ -f "$ROOT/test/host/cloud_host.cpp" ]; then
   g++ "${FLAGS[@]}" "$ROOT/test/host/cloud_host.cpp" "${SRC[@]}" -o "$OUT/cloud_host" ${LIBS[@]+"${LIBS[@]}"}
 fi
