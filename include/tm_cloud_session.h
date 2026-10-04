@@ -59,7 +59,7 @@ typedef struct {
     char uid[18];
     const uint8_t* key;
     size_t key_len;
-    uint16_t boot;
+    uint32_t boot;
     /** Pop the next uplink packet (a copy); 0 if none. */
     size_t (*next_uplink)(void* ctx, uint8_t* buf, size_t max, uint8_t* type, uint32_t now_ms);
     /** Drop everything queued: a new session starts from fresh observations only. */
@@ -69,6 +69,9 @@ typedef struct {
     void* cb_ctx;
 
     // State, owned by the session.
+    TmPacketContext secure;
+    uint8_t control_key[32];
+    uint32_t control_seq;
     TmCloudState state;
     uint32_t state_since_ms;
     uint32_t next_attempt_ms;
@@ -107,7 +110,7 @@ typedef struct {
 
 /** Prepare a session; `url` must already have passed tm_cloud_parse_url. */
 void tm_cloud_session_init(TmCloudSession* s, const TmCloudUrl* url, const char uid[18],
-                           const uint8_t* key, size_t key_len, uint16_t boot);
+                           const uint8_t* key, size_t key_len, uint32_t boot, const TmPacketContext* secure = NULL);
 
 /**
  * Advance the session. `link_up`: Wi-Fi associated. `time_ok`: the clock is

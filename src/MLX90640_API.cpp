@@ -97,13 +97,12 @@ int MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
     }    
     
     error = MLX90640_I2CRead(slaveAddr, 0x800D, 1, &controlRegister1);
-    frameData[832] = controlRegister1;
-    frameData[833] = statusRegister & 0x0001;
-    
     if(error != 0)
     {
         return error;
     }
+    frameData[832] = controlRegister1;
+    frameData[833] = statusRegister & 0x0001;
     
     return frameData[833];    
 }
@@ -570,7 +569,7 @@ void ExtractVDDParameters(uint16_t *eeData, paramsMLX90640 *mlx90640)
     }
     kVdd = 32 * kVdd;
     vdd25 = eeData[51] & 0x00FF;
-    vdd25 = ((vdd25 - 256) << 5) - 8192;
+    vdd25 = (vdd25 - 256) * 32 - 8192;
     
     mlx90640->kVdd = kVdd;
     mlx90640->vdd25 = vdd25; 
@@ -765,7 +764,7 @@ void ExtractAlphaParameters(uint16_t *eeData, paramsMLX90640 *mlx90640)
                 mlx90640->alpha[p] = mlx90640->alpha[p] - 64;
             }
             mlx90640->alpha[p] = mlx90640->alpha[p]*(1 << accRemScale);
-            mlx90640->alpha[p] = (alphaRef + (accRow[i] << accRowScale) + (accColumn[j] << accColumnScale) + mlx90640->alpha[p]);
+            mlx90640->alpha[p] = (alphaRef + accRow[i] * (1 << accRowScale) + accColumn[j] * (1 << accColumnScale) + mlx90640->alpha[p]);
             mlx90640->alpha[p] = mlx90640->alpha[p] / pow(2,(double)alphaScale);
         }
     }
@@ -838,7 +837,7 @@ void ExtractOffsetParameters(uint16_t *eeData, paramsMLX90640 *mlx90640)
                 mlx90640->offset[p] = mlx90640->offset[p] - 64;
             }
             mlx90640->offset[p] = mlx90640->offset[p]*(1 << occRemScale);
-            mlx90640->offset[p] = (offsetRef + (occRow[i] << occRowScale) + (occColumn[j] << occColumnScale) + mlx90640->offset[p]);
+            mlx90640->offset[p] = (offsetRef + occRow[i] * (1 << occRowScale) + occColumn[j] * (1 << occColumnScale) + mlx90640->offset[p]);
         }
     }
 }

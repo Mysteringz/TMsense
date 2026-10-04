@@ -234,8 +234,8 @@ int tm_cloud_parse_control(const char* text, size_t len, TmCloudControl* out) {
     } else if (!strcmp(type, "ack")) {
         uint32_t boot = 0;
         if (!get_str(f, n, "session", out->session, sizeof(out->session), 0)) return TM_CTL_FIELDS;
-        if (!get_u32(f, n, "boot", &boot, 0xFFFF) || !get_u32(f, n, "seq", &out->seq, 0xFFFFFFFFu)) return TM_CTL_FIELDS;
-        out->boot = (uint16_t) boot;
+        if (!get_u32(f, n, "boot", &boot, 0xFFFFFFFFu) || !get_u32(f, n, "seq", &out->seq, 0xFFFFFFFFu)) return TM_CTL_FIELDS;
+        out->boot = boot;
         out->type = TM_CTL_ACK;
     } else if (!strcmp(type, "ota_grant")) {
         if (!get_u32(f, n, "seq", &out->seq, 0xFFFFFFFFu)) return TM_CTL_FIELDS;
@@ -274,10 +274,14 @@ size_t tm_cloud_auth_json(char* out, size_t max, const char* uid, const char* no
 
 void tm_ack_reset(TmAckTracker* t) { t->n = 0; }
 
-void tm_ack_sent(TmAckTracker* t, uint8_t type, uint16_t boot, uint32_t seq, uint32_t now_ms) {
+void tm_ack_sent(TmAckTracker* t, uint8_t type, uint32_t boot, uint32_t seq, uint32_t now_ms) {
     if (t->n == TM_ACK_SLOTS) {
-        // Full: the oldest has waited through 15 newer packets; forget it.
-        memmove(&t->e[0], &t->e[1], sizeof(t->e[0]) * (TM_ACK_SLOTS - 1));
+        // Preserve the oldest REPORT: at high refresh rates, evicting it on
+        // every send keeps its age below the ACK deadline forever. Newer
+        // ACKs still retire earlier refused packets in tm_ack_match().
+        uint8_t victim = 0;
+        if (t->e[0].type == TM_TYPE_REPORT) victim = 1;
+        memmove(&t->e[victim], &t->e[victim + 1], sizeof(t->e[0]) * (TM_ACK_SLOTS - victim - 1));
         --t->n;
     }
     t->e[t->n].type = type;
@@ -287,7 +291,7 @@ void tm_ack_sent(TmAckTracker* t, uint8_t type, uint16_t boot, uint32_t seq, uin
     ++t->n;
 }
 
-uint8_t tm_ack_match(TmAckTracker* t, uint16_t boot, uint32_t seq) {
+uint8_t tm_ack_match(TmAckTracker* t, uint32_t boot, uint32_t seq) {
     for (uint8_t i = 0; i < t->n; ++i) {
         if (t->e[i].boot != boot || t->e[i].seq != seq) continue;
         const uint8_t type = t->e[i].type;
@@ -388,7 +392,9 @@ bool tm_http_parse_head(const char* head, size_t len, TmHttpHead* out) {
     out->content_length = -1;
     out->chunked = false;
     out->has_location = false;
-    if (len < 12 || strncmp(head, "HTTP/1.", 7) != 0 || head[8] != ' ') return false;
+    if (len < 16 || memcmp(head + len - 4, "\r\n\r\n", 4) != 0 ||
+        strncmp(head, "HTTP/1.", 7) != 0 || (head[7] != '0' && head[7] != '1') || head[8] != ' ' ||
+        (head[12] != ' ' && head[12] != '\r')) return false;
     if (!isdigit((unsigned char) head[9]) || !isdigit((unsigned char) head[10]) || !isdigit((unsigned char) head[11])) return false;
     out->status = (head[9] - '0') * 100 + (head[10] - '0') * 10 + (head[11] - '0');
     const char* p = head;
@@ -411,6 +417,7 @@ bool tm_http_parse_head(const char* head, size_t len, TmHttpHead* out) {
         const char* ve = line + n;
         while (v < ve && *v == ' ') ++v;
         if (!strcmp(name, "content-length")) {
+            if (out->content_length >= 0) return false;  // ambiguous framing
             int64_t cl = 0;
             if (v == ve) return false;
             for (const char* d = v; d < ve; ++d) {

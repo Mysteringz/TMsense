@@ -46,6 +46,7 @@ static int start_frame(TmWsParser* p) {
         case TM_WS_OP_PING:
         case TM_WS_OP_PONG:
             if (!p->fin || p->payload_len > TM_WS_MAX_CONTROL) return TM_WS_ERR_CONTROL;
+            if (p->opcode == TM_WS_OP_CLOSE && p->payload_len == 1) return TM_WS_ERR_CONTROL;
             p->ctl_len = 0;
             return 0;
         case TM_WS_OP_TEXT:
@@ -132,7 +133,7 @@ size_t tm_ws_feed(TmWsParser* p, const uint8_t* data, size_t len, TmWsEvent* ev)
 
 size_t tm_ws_frame(uint8_t* out, size_t max, uint8_t opcode, const uint8_t* payload, size_t len, const uint8_t mask[4]) {
     const size_t head = 2 + (len < 126 ? 0 : len <= 0xFFFF ? 2 : 8) + 4;
-    if (max < head + len) return 0;
+    if (max < head || len > max - head) return 0;
     size_t o = 0;
     out[o++] = (uint8_t) (0x80 | (opcode & 0x0F));
     if (len < 126) {
@@ -224,16 +225,24 @@ static bool header_value(const char* head, size_t len, const char* name, char* o
 
 static bool contains_token_ci(const char* value, const char* token) {
     const size_t t = strlen(token);
-    for (const char* p = value; *p; ++p) {
+    const char* p = value;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') ++p;
+        const char* begin = p;
+        while (*p && *p != ',') ++p;
+        const char* end = p;
+        while (end > begin && (end[-1] == ' ' || end[-1] == '\t')) --end;
+        if ((size_t) (end - begin) != t) continue;
         size_t k = 0;
-        while (k < t && p[k] && tolower((unsigned char) p[k]) == tolower((unsigned char) token[k])) ++k;
+        while (k < t && tolower((unsigned char) begin[k]) == tolower((unsigned char) token[k])) ++k;
         if (k == t) return true;
     }
     return false;
 }
 
 int tm_ws_check_response(const char* head, size_t len, const char* key_b64, const char* subprotocol) {
-    if (len < 12 || strncmp(head, "HTTP/1.1 101", 12) != 0) return TM_WS_HS_STATUS;
+    if (len < 16 || memcmp(head + len - 4, "\r\n\r\n", 4) != 0 ||
+        strncmp(head, "HTTP/1.1 101", 12) != 0 || (head[12] != ' ' && head[12] != '\r')) return TM_WS_HS_STATUS;
     char v[96];
     if (!header_value(head, len, "Upgrade", v, sizeof(v)) || !contains_token_ci(v, "websocket")) return TM_WS_HS_UPGRADE;
     if (!header_value(head, len, "Connection", v, sizeof(v)) || !contains_token_ci(v, "upgrade")) return TM_WS_HS_UPGRADE;

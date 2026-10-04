@@ -30,10 +30,25 @@ int main(int argc, char** argv) {
     static uint8_t buf[TM_PACKET_MAX_SIZE];
     TmPacketContext ctx;
     context(&ctx);
+    if ((argc > 1 && !strcmp(argv[1], "emit-secure")) || (argc > 3 && !strcmp(argv[3], "secure"))) {
+        ctx.secure_id = 7; memset(ctx.master, 0x11, 32); memset(ctx.epoch, 0x22, 16); ctx.boot = 70000;
+    }
+
+    if (argc >= 3 && !strcmp(argv[1], "parse-ack")) {
+        const char* hex = argv[2];
+        size_t n = strlen(hex) / 2;
+        if (n > sizeof(buf) || strlen(hex) % 2) return 2;
+        for (size_t i = 0; i < n; ++i) sscanf(hex + 2 * i, "%2hhx", &buf[i]);
+        uint8_t type = 0;
+        const int r = tm_parse_ack(buf, n, &ctx, &type);
+        printf("{\"result\":%d,\"type\":%u}\n", r, (unsigned)type);
+        return 0;
+    }
 
     if (argc >= 3 && !strcmp(argv[1], "parse")) {
         const char* hex = argv[2];
         size_t n = strlen(hex) / 2;
+        if (n > sizeof(buf) || strlen(hex) % 2) return 2;
         for (size_t i = 0; i < n; ++i) sscanf(hex + 2 * i, "%2hhx", &buf[i]);
         TmCommand cmd;
         memset(&cmd, 0, sizeof(cmd));
@@ -46,6 +61,7 @@ int main(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "parse-ota")) {
         const char* hex = argv[2];
         size_t n = strlen(hex) / 2;
+        if (n > sizeof(buf) || strlen(hex) % 2) return 2;
         for (size_t i = 0; i < n; ++i) sscanf(hex + 2 * i, "%2hhx", &buf[i]);
         TmOtaRequest ota;
         memset(&ota, 0, sizeof(ota));

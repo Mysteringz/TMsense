@@ -6,3 +6,8 @@ __pycache__/
 *.pyc
 .DS_Store
 include/tm_test_ca.h
+.env
+.env.*
+*.pem
+*.key
+*-keys.json

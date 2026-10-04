@@ -7,6 +7,8 @@
  * configures is in flash, set over USB serial -- see `help` on the console.
  */
 #include <Arduino.h>
+#include <WiFi.h>
+#include <esp_random.h>
 #include <esp_system.h>
 #include "tm_cloud.h"
 #include "tm_config.h"
@@ -24,7 +26,7 @@ static TmDetector s_detector;
 static TmPacketContext s_ctx;
 static float s_frame[TM_GRID_SIZE];
 static uint8_t s_packet[TM_PACKET_MAX_SIZE];
-static uint8_t s_rx[TM_HEADER_SIZE + TM_OTA_SIZE + TM_TAG_SIZE];
+static uint8_t s_rx[TM_PACKET_MAX_SIZE];
 
 static bool s_sensor_ok = false;
 static uint32_t s_sensor_retry_ms = 0;
@@ -74,6 +76,17 @@ static void apply_params() {
 }
 
 static void load_key() {
+    s_ctx.secure_id = g_settings.secure_id;
+    memcpy(s_ctx.master, g_settings.secure_master, 32);
+    if (s_ctx.secure_id) {
+        // The Wi-Fi radio supplies continuous entropy to the hardware RNG.
+        if (!WiFi.mode(WIFI_STA)) {
+            g_settings.replay_ready = false;
+            Serial.println("[security] cannot start hardware entropy source; transport disabled");
+            return;
+        }
+        esp_fill_random(s_ctx.epoch, sizeof(s_ctx.epoch));
+    }
     s_ctx.key_len = strlen(g_settings.key);
     memcpy(s_ctx.key, g_settings.key, s_ctx.key_len);
 }
@@ -99,8 +112,10 @@ static void handle_ota(const TmOtaRequest& req) {
                       (unsigned long) req.seq, (unsigned long) g_settings.last_cmd);
         return;
     }
-    g_settings.last_cmd = req.seq;
-    tm_settings_persist_last_cmd();
+    if (!tm_settings_accept_command(req.seq)) {
+        Serial.println("[ota] refused: cannot persist replay counter");
+        return;
+    }
     if (tm_transport_is_cloud()) {
         // Over the cloud session the image comes from the provisioned host,
         // never from wherever the packet seemed to come from.
@@ -135,7 +150,7 @@ static void send_status() {
     st.last_cmd = g_settings.last_cmd;
     st.flags = (s_sensor_ok ? TM_STATUS_SENSOR_OK : 0) |
                (s_detector.background_ready ? TM_STATUS_BACKGROUND_READY : 0) |
-               (s_ctx.key_len > 0 ? TM_STATUS_SIGNED : 0);
+               ((s_ctx.key_len > 0 || s_ctx.secure_id) ? TM_STATUS_SIGNED : 0);
     const size_t n = tm_build_status(s_packet, &s_ctx, millis(), &st, g_settings.params, TM_PARAM_COUNT);
     if (tm_transport_send(s_packet, n, true) > 0) s_uplink_ok = true;
     s_last_status_ms = millis();
@@ -147,8 +162,10 @@ static void handle_command(const TmCommand& cmd) {
                       (unsigned long) cmd.seq, (unsigned long) g_settings.last_cmd);
         return;
     }
-    g_settings.last_cmd = cmd.seq;
-    tm_settings_persist_last_cmd();
+    if (!tm_settings_accept_command(cmd.seq)) {
+        Serial.println("[cmd] refused: cannot persist replay counter");
+        return;
+    }
     switch (cmd.opcode) {
         case TM_CMD_SET_PARAM: {
             const bool ok = tm_settings_set_param(cmd.arg0, cmd.value);
@@ -211,7 +228,7 @@ static void process_frame() {
                  (s_detector.truncated ? TM_REPORT_TRUNCATED : 0);
 
     size_t n = tm_build_report(s_packet, &s_ctx, now, &info, s_detector.detections, count);
-    tm_transport_send(s_packet, n, true);
+    if (tm_transport_send(s_packet, n, true) > 0) s_uplink_ok = true;
 
     const int32_t raw_every = g_settings.params[TM_PARAM_RAW_EVERY];
     if (raw_every > 0 && frame_no % (uint32_t) raw_every == 0) {
@@ -284,7 +301,7 @@ static void display_tick(uint32_t now) {
     st.wifi_joined = tm_transport_connected();
     strncpy(st.ssid, g_settings.ssid, sizeof(st.ssid) - 1);
     st.rssi = tm_transport_rssi();
-    st.key_set = s_ctx.key_len > 0;
+    st.key_set = s_ctx.key_len > 0 || s_ctx.secure_id;
     st.cloud = tm_transport_is_cloud();
     if (st.cloud) {
         TmCloudInfo info;
@@ -372,7 +389,7 @@ void setup() {
     Serial.printf("[boot] uid     %02x:%02x:%02x:%02x:%02x:%02x   boot #%u\n", s_ctx.uid[0], s_ctx.uid[1],
                   s_ctx.uid[2], s_ctx.uid[3], s_ctx.uid[4], s_ctx.uid[5], (unsigned) s_ctx.boot);
     if (g_settings.node_id) Serial.printf("[boot] node id %u\n", (unsigned) g_settings.node_id);
-    Serial.printf("[boot] signing %s\n", s_ctx.key_len ? "on" : "OFF (no key; `set key ...`)");
+    Serial.printf("[boot] signing %s\n", (s_ctx.key_len || s_ctx.secure_id) ? "on" : "OFF (no key; `set key ...`)");
     if (g_settings.transport == TM_TRANSPORT_WSS) {
         Serial.printf("[boot] uplink  wss -> %s\n", g_settings.cloud_url);
     } else {
@@ -429,14 +446,16 @@ void loop() {
         return;
     }
     if (now_ms_second_tick()) {
-        if (tm_transport_is_cloud()) {
+        if (tm_transport_is_cloud() || g_settings.secure_id) {
             // Only a new ACK for a REPORT this boot generated counts: not a
             // socket write, not `ready`, not a ping, not an old ACK.
             const uint32_t acked = tm_transport_reports_acked();
-            tm_ota_health(tm_transport_uplink_ready(), s_sensor_ok, acked > s_acked_seen);
+            tm_ota_health(tm_transport_uplink_ready(), s_sensor_ok && s_frames > 0 && millis() - s_last_frame_ms < 5000,
+                          acked != 0 && acked != s_acked_seen);
             s_acked_seen = acked;
         } else {
-            tm_ota_health(tm_transport_connected(), s_sensor_ok, s_uplink_ok);
+            tm_ota_health(tm_transport_connected(), s_sensor_ok && s_frames > 0 && millis() - s_last_frame_ms < 5000,
+                          s_uplink_ok);
         }
         s_uplink_ok = false;
     }
