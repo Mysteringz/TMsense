@@ -16,7 +16,7 @@ the edge.
 
 | Packet | When | Size | Used for |
 |---|---|---|---|
-| REPORT | every frame (1 fps) | 44 B + 7 B per person, max 212 B | occupancy |
+| REPORT | every frame (1, 2 or 4 fps; default 1) | 44 B + 7 B per person, max 212 B | occupancy |
 | RAW | every `raw_every` frames (default 1, set 0 in production) | 806 B | debug console, calibration |
 | STATUS | every 10 s, and after every command | 118 B | fleet health, settings in force |
 
@@ -55,12 +55,22 @@ set pass <password>
 set edges 10.0.0.5,10.0.0.6   where to send: the site's TMWAccess, or TMedge directly
 set lora_gw <ip>          TMLAccess address, for LoRa mode
 set key <shared key>      same as TMedge's TM_KEY
+set fps <1|2|4>           complete thermal frames per second (default 1)
 save
 reboot
 ```
 
 `show` prints the settings; the password and key are never printed. `help`
 lists everything else (detector parameters, `reset-bg`, `factory`).
+
+TMsense 1.6 adds `set fps 1`, `set fps 2` and `set fps 4`. The rate takes
+effect immediately; `save` keeps it across reboots. `show` reports the configured
+rate as `fps` before `boot`, and advertises capability `fps1` for TMflash.
+These rates use MLX refresh codes 2, 3 and 4: the sensor needs two subpages
+for each complete frame. The existing `param refresh` control and stored
+settings remain compatible. RAW cadence and detector timing parameters stay
+in frames, so their intervals in seconds shorten at higher rates. Traffic
+scales with the selected rate; the figures above are for 1 fps.
 
 `pio run -e tmflash` builds the release image TMflash uses: identical, but
 built with `TM_NO_NODE_CONFIG` so no bench defaults are compiled in.

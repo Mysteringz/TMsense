@@ -36,7 +36,7 @@ typedef struct {
 #define TM_TRANSPORT_WSS 1
 
 /** What this firmware can do, for `show` (TMflash reads it before using new commands). */
-#define TM_CAPABILITIES "wss1,ota-https1"
+#define TM_CAPABILITIES "wss1,ota-https1,fps1"
 
 /** A test build (env:tmsense_testcloud) also accepts ws:// and other ports, for a local fixture. */
 #if defined(TM_CLOUD_TEST_BUILD)
