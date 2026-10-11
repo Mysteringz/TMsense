@@ -8,9 +8,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/build}"
 mkdir -p "$OUT"
-LIBS=()
-[ "$(uname)" = Darwin ] || LIBS=(-lcrypto)
-SRC=("$ROOT/src/tm_ws.cpp" "$ROOT/src/tm_cloud_proto.cpp" "$ROOT/src/tm_cloud_session.cpp" "$ROOT/src/tm_packet.cpp" "$ROOT/src/tm_detector.cpp")
+LIBS=(-lcrypto)
+if [ "$(uname)" = Darwin ]; then
+  CRYPTO_PREFIX="$(brew --prefix openssl@3)"
+  export CPLUS_INCLUDE_PATH="$CRYPTO_PREFIX/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+  export LIBRARY_PATH="$CRYPTO_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+fi
+SRC=("$ROOT/src/tm_ws.cpp" "$ROOT/src/tm_cloud_proto.cpp" "$ROOT/src/tm_cloud_session.cpp" "$ROOT/src/tm_packet.cpp" "$ROOT/src/tm_secure.cpp" "$ROOT/src/tm_detector.cpp")
 FLAGS=(-std=c++17 -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations -DTM_HOST_TEST -I"$ROOT/test/host" -I"$ROOT/include")
 g++ "${FLAGS[@]}" "$ROOT/test/host/cloud_test.cpp" "${SRC[@]}" -o "$OUT/cloud_test" ${LIBS[@]+"${LIBS[@]}"}
 # The start-up display's text and its "may go dark" rule.

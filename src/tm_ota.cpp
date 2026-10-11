@@ -60,6 +60,19 @@ static uint8_t running_slot() {
     return p ? (uint8_t) (p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0) : 0xff;
 }
 
+static bool revert() {
+    const esp_partition_t* other = esp_ota_get_next_update_partition(NULL);
+    if (!other || esp_ota_set_boot_partition(other) != ESP_OK) return false;
+    // The previous firmware may predate the tried flag. Clear it before
+    // returning there so a later retry initiated by that image can proceed.
+    Preferences prefs;
+    if (prefs.begin(NS, false)) prefs.putUChar("tried", 0);
+    prefs.end();
+    delay(200);
+    ESP.restart();
+    return true;
+}
+
 void tm_ota_init(TmOtaReporter reporter) {
     s_report = reporter;
     Preferences prefs;
@@ -72,6 +85,15 @@ void tm_ota_init(TmOtaReporter reporter) {
         return;
     }
     if (running_slot() == target) {
+        // A reset before confirmation is a failed trial, not another fresh
+        // three-minute window. This also bounds crash/watchdog reboot loops.
+        if (prefs.getUChar("tried", 0) != 0 || prefs.putUChar("tried", 1) != 1) {
+            prefs.end();
+            Serial.println("[ota] unconfirmed image restarted or probation cannot be persisted: reverting");
+            report(TM_OTA_FAILED, 0, TM_OTA_ERR_FLASH);
+            revert();
+            return;
+        }
         // The new image is the one running. It has not earned its place yet.
         s_probation = true;
         s_probation_start = millis();
@@ -94,34 +116,45 @@ void tm_ota_health(bool wifi_ok, bool sensor_ok, bool uplink_ok) {
     const uint32_t elapsed = millis() - s_probation_start;
     if (wifi_ok && sensor_ok && s_saw_uplink) {
         // Proven: keep it, and stop the bootloader from ever reverting it.
-        s_probation = false;
-        esp_ota_mark_app_valid_cancel_rollback();
         Preferences prefs;
-        prefs.begin(NS, false);
-        prefs.putUChar("pend", 0);
+        const bool saved = prefs.begin(NS, false) && prefs.putUChar("pend", 0) == 1;
         prefs.end();
-        Serial.println("[ota] new image confirmed");
-        report(TM_OTA_CONFIRMED, 100, TM_OTA_ERR_NONE);
-        return;
+        if (saved && esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            // Keep the first-trial marker until bootloader confirmation succeeds;
+            // a failed confirmation followed by reset must not start a new trial.
+            Preferences confirmed;
+            if (confirmed.begin(NS, false)) confirmed.putUChar("tried", 0);
+            confirmed.end();
+            s_probation = false;
+            Serial.println("[ota] new image confirmed");
+            report(TM_OTA_CONFIRMED, 100, TM_OTA_ERR_NONE);
+            return;
+        }
+        if (saved) {
+            // A failed bootloader confirmation is not success. Preserve the
+            // probation intent so a reset cannot hide the unconfirmed trial.
+            Preferences retry;
+            if (retry.begin(NS, false)) retry.putUChar("pend", 1);
+            retry.end();
+            Serial.println("[ota] bootloader confirmation failed; probation continues");
+        }  // failed persistence/confirmation still reaches the deadline below
     }
     if (elapsed < TM_OTA_PROVE_MS) return;
     // Out of time. Go back to the image that was working and reboot; the next
     // boot reports the revert.
-    const esp_partition_t* other = esp_ota_get_next_update_partition(NULL);
     Serial.printf("[ota] new image failed to prove itself (wifi=%d sensor=%d uplink=%d): reverting\n",
                   (int) wifi_ok, (int) sensor_ok, (int) s_saw_uplink);
     report(TM_OTA_FAILED, 0, wifi_ok ? TM_OTA_ERR_FLASH : TM_OTA_ERR_NO_WIFI);
-    if (other && esp_ota_set_boot_partition(other) == ESP_OK) {
-        delay(200);
-        ESP.restart();
-    }
+    revert();
     s_probation = false;   // cannot revert: stay up rather than loop
 }
 
 void tm_ota_begin(const TmOtaRequest* req, const uint8_t gateway[4]) {
     if (s_busy || s_probation) {
+        const uint32_t current_image = s_image;
         s_image = image_id(req->sha256);
         report(TM_OTA_FAILED, 0, TM_OTA_ERR_BUSY);
+        s_image = current_image;
         return;
     }
     s_req = *req;
@@ -137,11 +170,14 @@ void tm_ota_begin(const TmOtaRequest* req, const uint8_t gateway[4]) {
 }
 
 void tm_ota_begin_cloud(const TmOtaRequest* req, const char* host, uint16_t port) {
-    s_image = image_id(req->sha256);
     if (s_busy || s_probation) {
+        const uint32_t current_image = s_image;
+        s_image = image_id(req->sha256);
         report(TM_OTA_FAILED, 0, TM_OTA_ERR_BUSY);
+        s_image = current_image;
         return;
     }
+    s_image = image_id(req->sha256);
     // Only /fw/<16 lowercase hex>.bin on the provisioned port: the request
     // cannot point the node at another path, and never at another host.
     bool path_ok = strlen(req->path) == 24 && !strncmp(req->path, "/fw/", 4) && !strcmp(req->path + 20, ".bin");
@@ -181,6 +217,21 @@ void tm_ota_begin_cloud(const TmOtaRequest* req, const char* host, uint16_t port
 // Scratch for writing the image: 1 kB at a time, off the loop task's stack.
 static uint8_t s_chunk[1024];
 
+/** Record probation before Update.end() changes the boot partition. */
+static bool stage_probation() {
+    const esp_partition_t* target = esp_ota_get_next_update_partition(NULL);
+    if (!target || target->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_0 ||
+        target->subtype > ESP_PARTITION_SUBTYPE_APP_OTA_1) return false;
+    Preferences prefs;
+    if (!prefs.begin(NS, false)) return false;
+    const bool ok = prefs.putUChar("tried", 0) == 1 &&
+                    prefs.putUChar("slot", (uint8_t) (target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0)) == 1 &&
+                    prefs.putUInt("img", s_image) == sizeof(s_image) && prefs.putUChar("pend", 1) == 1;
+    if (!ok) prefs.putUChar("pend", 0);
+    prefs.end();
+    return ok;
+}
+
 /**
  * Stream exactly s_req.size bytes into the spare partition, hashing as it
  * goes. Returns false (having reported why) on any failure; on success the
@@ -200,7 +251,8 @@ static bool write_image(Stream* stream, Client* conn) {
     uint8_t last_percent = 0;
     uint32_t last_report = millis();
     uint32_t idle_since = millis();
-    while (got < s_req.size) {
+    const uint32_t download_start = millis();
+    while (got < s_req.size && millis() - download_start < TM_OTA_DOWNLOAD_MS) {
         const size_t avail = stream->available();
         if (avail == 0) {
             if (!conn->connected() || millis() - idle_since > 15000) break;
@@ -249,7 +301,16 @@ static bool write_image(Stream* stream, Client* conn) {
         return false;
     }
     report(TM_OTA_APPLYING, 100, TM_OTA_ERR_NONE);
+    if (!stage_probation()) {
+        Serial.println("[ota] cannot persist probation; image not activated");
+        Update.abort();
+        report(TM_OTA_FAILED, 100, TM_OTA_ERR_FLASH);
+        return false;
+    }
     if (!Update.end(true)) {
+        Preferences prefs;
+        if (prefs.begin(NS, false)) prefs.putUChar("pend", 0);
+        prefs.end();
         Serial.printf("[ota] could not finish: %s\n", Update.errorString());
         report(TM_OTA_FAILED, 100, TM_OTA_ERR_FLASH);
         return false;
@@ -259,14 +320,6 @@ static bool write_image(Stream* stream, Client* conn) {
 
 /** Remember what was flashed and where, then reboot into it. */
 static void activate() {
-    const esp_partition_t* target = esp_ota_get_boot_partition();
-    Preferences prefs;
-    prefs.begin(NS, false);
-    prefs.putUChar("pend", 1);
-    prefs.putUChar("slot", target ? (uint8_t) (target->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0) : 0xff);
-    prefs.putUInt("img", s_image);
-    prefs.end();
-
     Serial.println("[ota] image written; rebooting into it");
     report(TM_OTA_REBOOTING, 100, TM_OTA_ERR_NONE);
     delay(s_cloud ? 1500 : 300);   // let the packet leave before the radio goes

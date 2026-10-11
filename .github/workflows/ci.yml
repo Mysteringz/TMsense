@@ -21,7 +21,12 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install host and firmware tools
-        run: python -m pip install numpy==2.2.6 platformio==6.1.18
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libmbedtls-dev
+          python -m pip install numpy==2.2.6 platformio==6.1.18 cryptography==50.0.2
+      - name: Native authenticated-encryption vectors and tampering tests
+        run: bash test/host/build_secure_host.sh
       - name: Packet host harness
         run: test/host/build_packet_host.sh
       - name: Detector scenarios
@@ -30,6 +35,8 @@ jobs:
       # queue and session state machine, compiled from src/ unchanged.
       - name: Cloud transport host tests
         run: test/host/build_cloud_host.sh && build/cloud_test && build/display_test
+      - name: OTA, settings and sensor fault regressions
+        run: bash test/host/build_safety_host.sh && build/safety_test && python test/host/listen_test.py
       - name: Compile firmware without bench secrets
         run: pio run -e tmflash
       - name: Compile the test-fixture build too (never released)

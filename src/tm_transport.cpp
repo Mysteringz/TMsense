@@ -17,6 +17,9 @@ static bool s_was_connected = false;
 static bool s_down_open = false;
 static uint32_t s_last_attempt_ms = 0;
 static uint16_t s_drops = 0;
+static TmPacketContext s_udp_context;
+static TmAckTracker s_udp_acks;
+static uint32_t s_udp_reports_acked = 0, s_udp_ack_ms = 0;
 
 static void load_edges() {
     s_edge_count = 0;
@@ -49,11 +52,27 @@ static void start_cloud() {
     }
     uint8_t uid[6];
     tm_transport_uid(uid);
-    tm_cloud_begin(&url, uid, (const uint8_t*) g_settings.key, strlen(g_settings.key), g_settings.boot);
-    Serial.printf("[cloud] transport wss -> %s%s\n", g_settings.cloud_url, g_settings.key[0] ? "" : " (NO KEY: it will be refused)");
+    uint8_t auth_key[32];
+    if (s_udp_context.secure_id) {
+        if (!tm_secure_derive(s_udp_context.master, uid, s_udp_context.secure_id, "auth", NULL, 0, auth_key)) return;
+        tm_cloud_begin(&url, uid, auth_key, 32, g_settings.boot, &s_udp_context);
+        memset(auth_key, 0, sizeof(auth_key));
+    } else tm_cloud_begin(&url, uid, (const uint8_t*)g_settings.key, strlen(g_settings.key), g_settings.boot);
+    Serial.printf("[cloud] transport wss -> %s%s\n", g_settings.cloud_url, (g_settings.key[0] || g_settings.secure_id) ? "" : " (NO KEY: it will be refused)");
 }
 
 void tm_transport_begin() {
+    if (!g_settings.replay_ready) {
+        tm_cloud_stop();
+        WiFi.mode(WIFI_OFF);
+        Serial.println("[security] uplink disabled: boot replay protection is unavailable");
+        return;
+    }
+    memset(&s_udp_context, 0, sizeof(s_udp_context));
+    tm_transport_uid(s_udp_context.uid); s_udp_context.boot = g_settings.boot;
+    s_udp_context.secure_id = g_settings.secure_id; memcpy(s_udp_context.master, g_settings.secure_master, 32);
+    s_udp_context.key_len = strlen(g_settings.key); memcpy(s_udp_context.key, g_settings.key, s_udp_context.key_len);
+    tm_ack_reset(&s_udp_acks);
     load_edges();
     if (lora_mode()) {
         // The LoRa uplink (to TMLAccess) is not written yet. Say so plainly
@@ -95,7 +114,7 @@ void tm_transport_restart() {
 }
 
 void tm_transport_update() {
-    if (lora_mode() || !g_settings.ssid[0]) return;
+    if (!g_settings.replay_ready || lora_mode() || !g_settings.ssid[0]) return;
     if (WiFi.status() == WL_CONNECTED) {
         if (!s_was_connected) {
             s_was_connected = true;
@@ -126,7 +145,7 @@ void tm_transport_update() {
     WiFi.begin(g_settings.ssid, g_settings.password);
 }
 
-bool tm_transport_connected() { return !lora_mode() && WiFi.status() == WL_CONNECTED; }
+bool tm_transport_connected() { return g_settings.replay_ready && !lora_mode() && WiFi.status() == WL_CONNECTED; }
 
 bool tm_transport_uplink_ready() {
     if (!tm_transport_connected()) return false;
@@ -155,21 +174,21 @@ void tm_transport_describe(char* out, size_t max) {
 }
 
 int32_t tm_transport_report_ack_age_s() {
-    if (!cloud_mode()) return -2;
+    if (!cloud_mode()) return g_settings.secure_id ? (s_udp_ack_ms ? (int32_t)((millis() - s_udp_ack_ms) / 1000) : -1) : -2;
     TmCloudInfo info;
     tm_cloud_info(&info);
     return info.last_report_ack_ms ? (int32_t) ((millis() - info.last_report_ack_ms) / 1000) : -1;
 }
 
 uint32_t tm_transport_reports_acked() {
-    if (!cloud_mode()) return 0;
+    if (!cloud_mode()) return s_udp_reports_acked;
     TmCloudInfo info;
     tm_cloud_info(&info);
     return info.reports_acked;
 }
 
 int tm_transport_send(const uint8_t* data, size_t len, bool all_edges) {
-    if (!tm_transport_connected()) return 0;
+    if (!len || !tm_transport_connected()) return 0;
     // One edge, one socket: `all_edges` is a UDP notion.
     if (cloud_mode()) return tm_cloud_send(data, len) ? 1 : 0;
     if (s_edge_count == 0) return 0;
@@ -179,12 +198,16 @@ int tm_transport_send(const uint8_t* data, size_t len, bool all_edges) {
         s_up.write(data, len);
         if (s_up.endPacket() == 1) ++reached;
     }
+    if (reached && g_settings.secure_id && len >= TM_SECURE_HEADER) {
+        tm_ack_sent(&s_udp_acks, data[3], tm_wire_boot(data), tm_wire_seq(data), millis());
+    }
     return reached;
 }
 
 static uint8_t s_remote[4] = {0, 0, 0, 0};
 
 size_t tm_transport_receive(uint8_t* buf, size_t max) {
+    if (!g_settings.replay_ready) return 0;
     if (cloud_mode()) return tm_cloud_receive(buf, max);
     if (!s_down_open) return 0;
     const int n = s_down.parsePacket();
@@ -195,7 +218,16 @@ size_t tm_transport_receive(uint8_t* buf, size_t max) {
     }
     const IPAddress from = s_down.remoteIP();
     for (int i = 0; i < 4; ++i) s_remote[i] = from[i];
-    return (size_t) s_down.read(buf, max);
+    const size_t received = (size_t)s_down.read(buf, max);
+    if (received > 3 && buf[3] == TM_TYPE_ACK) {
+        uint8_t type = 0;
+        if (tm_parse_ack(buf, received, &s_udp_context, &type) == TM_PARSE_OK &&
+            tm_ack_match(&s_udp_acks, tm_wire_boot(buf), tm_wire_seq(buf)) == TM_TYPE_REPORT && type == TM_TYPE_REPORT) {
+            ++s_udp_reports_acked; s_udp_ack_ms = millis() ? millis() : 1;
+        }
+        return 0;
+    }
+    return received;
 }
 
 void tm_transport_remote(uint8_t out[4]) { memcpy(out, s_remote, 4); }

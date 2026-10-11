@@ -24,11 +24,13 @@ static TmCloudSession s_session;
 static TmPacketQueue s_up;
 static struct {
     uint16_t len;
-    uint8_t data[TM_HEADER_SIZE + TM_OTA_SIZE + TM_TAG_SIZE];
+    uint8_t data[TM_PACKET_MAX_SIZE];
 } s_down[2];
 static uint8_t s_down_count = 0;
 static uint8_t s_key[TM_KEY_MAX_LEN];
 static size_t s_key_len = 0;
+static uint8_t s_pending_key[TM_KEY_MAX_LEN];
+static size_t s_pending_key_len = 0;
 
 static WiFiClientSecure s_tls;
 static WiFiClient s_plain;   // test build only: ws:// to a local fixture
@@ -37,11 +39,13 @@ static bool s_use_tls = true;
 static SemaphoreHandle_t s_lock = NULL;
 static StaticSemaphore_t s_lock_buf;
 static TaskHandle_t s_task = NULL;
-static volatile bool s_enabled = false;
-static volatile bool s_reconfigure = false;
-static volatile bool s_pause_wanted = false;
-static volatile bool s_paused = false;
-static volatile bool s_status_request = false;
+// Shared flags and pending configuration are always read/written under
+// s_lock. volatile alone does not synchronize the two ESP32 cores.
+static bool s_enabled = false;
+static bool s_reconfigure = false;
+static bool s_pause_wanted = false;
+static bool s_paused = false;
+static bool s_status_request = false;
 static bool s_sntp_started = false;
 static TmCloudInfo s_info;
 // The session's grant, copied out under the lock: the session itself is the
@@ -55,7 +59,8 @@ static struct {
 } s_grant;
 static TmCloudUrl s_pending_url;
 static uint8_t s_pending_uid[6];
-static uint16_t s_pending_boot = 0;
+static uint32_t s_pending_boot = 0;
+static TmPacketContext s_pending_secure;
 
 #define LOCK() xSemaphoreTake(s_lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_lock)
@@ -197,6 +202,8 @@ static void cb_down(void*, const uint8_t* data, size_t len) {
 // --- the task ----------------------------------------------------------------------
 
 static void configure() {
+    io_close(NULL);
+    LOCK();
     uint8_t* uid = s_pending_uid;
     char uid_s[18];
     tm_cloud_uid_string(uid, uid_s);
@@ -204,9 +211,17 @@ static void configure() {
     s_session.discard_uplink = cb_discard;
     s_session.on_downlink = cb_down;
     s_session.cb_ctx = NULL;
-    io_close(NULL);
-    tm_cloud_session_init(&s_session, &s_pending_url, uid_s, s_key, s_key_len, s_pending_boot);
+    memset(s_key, 0, sizeof(s_key));
+    s_key_len = s_pending_key_len;
+    memcpy(s_key, s_pending_key, s_key_len);
+    s_down_count = 0;
+    tm_queue_clear(&s_up);
+    tm_cloud_session_init(&s_session, &s_pending_url, uid_s, s_key, s_key_len, s_pending_boot, &s_pending_secure);
     s_use_tls = s_pending_url.tls;
+    s_paused = false;
+    memset(&s_info, 0, sizeof(s_info));
+    s_reconfigure = false;
+    UNLOCK();
 }
 
 static void publish_info() {
@@ -230,11 +245,14 @@ static void publish_info() {
 
 static void task(void*) {
     for (;;) {
-        if (s_reconfigure) {
-            s_reconfigure = false;
-            configure();
-        }
-        if (!s_enabled) {
+        LOCK();
+        const bool reconfigure = s_reconfigure;
+        const bool enabled = s_enabled;
+        const bool pause_wanted = s_pause_wanted;
+        const bool paused = s_paused;
+        UNLOCK();
+        if (reconfigure) configure();
+        if (!enabled) {
             if (s_session.state != TM_CLOUD_OFF) {
                 tm_cloud_session_pause(&s_session, &s_io, true, millis());
                 s_session.state = TM_CLOUD_OFF;
@@ -250,15 +268,19 @@ static void task(void*) {
             configTime(0, 0, "time.cloudflare.com", "pool.ntp.org", "time.google.com");
             s_sntp_started = true;
         }
-        if (s_pause_wanted != s_paused) {
-            tm_cloud_session_pause(&s_session, &s_io, s_pause_wanted, millis());
-            s_paused = s_pause_wanted;
+        if (pause_wanted != (reconfigure ? false : paused)) {
+            tm_cloud_session_pause(&s_session, &s_io, pause_wanted, millis());
+            LOCK();
+            s_paused = pause_wanted;
+            UNLOCK();
         }
         const TmCloudState before = s_session.state;
         tm_cloud_session_step(&s_session, &s_io, millis(), link, tm_cloud_time_ok());
         if (s_session.want_status) {
             s_session.want_status = false;
+            LOCK();
             s_status_request = true;
+            UNLOCK();
         }
         // TMflash waits for this line: "joined Wi-Fi" is not "the edge took
         // a report", and only the second means provisioning worked.
@@ -279,35 +301,57 @@ static void task(void*) {
     }
 }
 
-void tm_cloud_begin(const TmCloudUrl* url, const uint8_t uid[6], const uint8_t* key, size_t key_len, uint16_t boot) {
+void tm_cloud_begin(const TmCloudUrl* url, const uint8_t uid[6], const uint8_t* key, size_t key_len, uint32_t boot, const TmPacketContext* secure) {
     if (!s_lock) s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
     LOCK();
     s_pending_url = *url;
     memcpy(s_pending_uid, uid, 6);
     s_pending_boot = boot;
-    s_key_len = key_len > sizeof(s_key) ? sizeof(s_key) : key_len;
-    memcpy(s_key, key, s_key_len);
+    if (secure) s_pending_secure = *secure;
+    else memset(&s_pending_secure, 0, sizeof(s_pending_secure));
+    s_pending_key_len = key_len > sizeof(s_pending_key) ? sizeof(s_pending_key) : key_len;
+    memset(s_pending_key, 0, sizeof(s_pending_key));
+    memcpy(s_pending_key, key, s_pending_key_len);
     tm_queue_clear(&s_up);
     s_down_count = 0;
-    UNLOCK();
+    memset(&s_info, 0, sizeof(s_info));
+    memset(&s_grant, 0, sizeof(s_grant));
+    s_status_request = false;
+    s_pause_wanted = false;
     s_reconfigure = true;
     s_enabled = true;
+    UNLOCK();
     if (!s_task) {
         // Core 0, beside the Wi-Fi stack; the sensor loop keeps core 1. 12 kB:
         // an mbedTLS handshake is the deepest thing it does (see `show`).
-        xTaskCreatePinnedToCore(task, "tm_cloud", 12288, NULL, 1, &s_task, 0);
+        if (xTaskCreatePinnedToCore(task, "tm_cloud", 12288, NULL, 1, &s_task, 0) != pdPASS) tm_cloud_stop();
     }
 }
 
-void tm_cloud_stop() { s_enabled = false; }
-bool tm_cloud_active() { return s_enabled; }
+void tm_cloud_stop() {
+    if (!s_lock) return;
+    LOCK();
+    s_enabled = false;
+    tm_queue_clear(&s_up);
+    s_down_count = 0;
+    memset(&s_grant, 0, sizeof(s_grant));
+    s_status_request = false;
+    UNLOCK();
+}
+bool tm_cloud_active() {
+    if (!s_lock) return false;
+    LOCK();
+    const bool enabled = s_enabled;
+    UNLOCK();
+    return enabled;
+}
 
 bool tm_cloud_send(const uint8_t* data, size_t len) {
-    if (!s_enabled || !s_lock) return false;
+    if (!s_lock) return false;
     LOCK();
     // Nothing is queued unless a session is ready to take it: a node that
     // cannot send keeps no history to flush later.
-    const bool ok = s_info.state == TM_CLOUD_READY && tm_queue_push(&s_up, data, len, millis());
+    const bool ok = s_enabled && !s_reconfigure && s_info.state == TM_CLOUD_READY && tm_queue_push(&s_up, data, len, millis());
     UNLOCK();
     return ok;
 }
@@ -316,7 +360,7 @@ size_t tm_cloud_receive(uint8_t* buf, size_t max) {
     if (!s_lock) return 0;
     size_t n = 0;
     LOCK();
-    if (s_down_count > 0 && s_down[0].len <= max) {
+    if (s_enabled && !s_reconfigure && s_down_count > 0 && s_down[0].len <= max) {
         n = s_down[0].len;
         memcpy(buf, s_down[0].data, n);
         s_down[0] = s_down[1];
@@ -333,20 +377,23 @@ void tm_cloud_info(TmCloudInfo* out) {
     }
     LOCK();
     *out = s_info;
+    if (!s_enabled || s_reconfigure) out->state = TM_CLOUD_OFF;
     UNLOCK();
-    if (!s_enabled) out->state = TM_CLOUD_OFF;
 }
 
 bool tm_cloud_take_status_request() {
-    if (!s_status_request) return false;
+    if (!s_lock) return false;
+    LOCK();
+    const bool wanted = s_status_request && s_enabled && !s_reconfigure;
     s_status_request = false;
-    return true;
+    UNLOCK();
+    return wanted;
 }
 
 bool tm_cloud_grant(uint32_t seq, const char* build, char token[65]) {
     if (!s_lock) return false;
     LOCK();
-    const bool ok = s_grant.valid && s_grant.seq == seq && !strcmp(s_grant.build, build) &&
+    const bool ok = s_enabled && !s_reconfigure && s_grant.valid && s_grant.seq == seq && !strcmp(s_grant.build, build) &&
                     (int32_t) (s_grant.expires_ms - millis()) > 0;
     if (ok) memcpy(token, s_grant.token, 65);
     UNLOCK();
@@ -354,11 +401,17 @@ bool tm_cloud_grant(uint32_t seq, const char* build, char token[65]) {
 }
 
 bool tm_cloud_pause(bool paused, uint32_t wait_ms) {
+    if (!s_lock || !s_task) return !paused;
+    LOCK();
     s_pause_wanted = paused;
+    UNLOCK();
     const uint32_t start = millis();
-    while (s_paused != paused) {
+    for (;;) {
+        LOCK();
+        const bool done = s_paused == paused;
+        UNLOCK();
+        if (done) return true;
         if (millis() - start > wait_ms) return false;
         delay(10);
     }
-    return true;
 }

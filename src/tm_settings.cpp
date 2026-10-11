@@ -103,13 +103,10 @@ void tm_settings_begin() {
     // Absent on every node provisioned before this firmware: they stay udp.
     if (s_prefs.isKey("cloud_url")) s_prefs.getString("cloud_url", g_settings.cloud_url, sizeof(g_settings.cloud_url));
     const uint8_t transport = s_prefs.getUChar("transport", TM_TRANSPORT_UDP);
-    TmCloudUrl url;
-    // A stored wss that no longer validates (or a LoRa node) falls back to
-    // udp rather than trying to connect somewhere it should not.
-    g_settings.transport = transport == TM_TRANSPORT_WSS && g_settings.mode == TM_MODE_WIFI &&
-                                   tm_cloud_parse_url(g_settings.cloud_url, TM_CLOUD_ALLOW_TEST_URL, &url) == TM_URL_OK
-                               ? TM_TRANSPORT_WSS
-                               : TM_TRANSPORT_UDP;
+    // Keep an explicitly provisioned cloud node on cloud transport even if
+    // its URL is corrupt. start_cloud refuses it; silently using edges over
+    // UDP would weaken the configured transport's security.
+    g_settings.transport = transport == TM_TRANSPORT_WSS ? TM_TRANSPORT_WSS : TM_TRANSPORT_UDP;
     if (s_prefs.isKey("params")) {
         int32_t stored[TM_PARAM_COUNT];
         const size_t n = s_prefs.getBytes("params", stored, sizeof(stored));
@@ -119,11 +116,37 @@ void tm_settings_begin() {
         }
     }
     g_settings.last_cmd = s_prefs.getUInt("last_cmd", 0);
+    // An encryption enrollment survives factory reset. A missing/corrupt key
+    // under the durable policy disables networking instead of sending plaintext.
+    const bool required = s_prefs.getUChar("secure_req", 0) != 0 || s_prefs.isKey("secure");
+    if (required) {
+        uint8_t record[34] = {0};
+        const size_t stored = s_prefs.getBytes("secure", record, sizeof(record));
+        uint8_t any = 0; for (int i = 2; i < 34; ++i) any |= record[i];
+        if (stored != sizeof(record) || !(record[0] | record[1]) || !any) {
+            memset(record, 0, sizeof(record));
+            Serial.println("[security] encrypted enrollment is damaged; transport disabled");
+            return;
+        }
+        g_settings.secure_id = (uint16_t)record[0] | ((uint16_t)record[1] << 8);
+        memcpy(g_settings.secure_master, record + 2, 32); memset(record, 0, sizeof(record));
+    }
+
     // The boot counter makes (boot, seq) strictly increasing across power
     // cycles, which is what lets the edge reject a replayed packet without
     // having to guess whether a node rebooted.
-    g_settings.boot = (uint16_t) (s_prefs.getUShort("boot", 0) + 1);
-    s_prefs.putUShort("boot", g_settings.boot);
+    const uint32_t legacy_counter = s_prefs.getUShort("boot", 0), wide_counter = s_prefs.getUInt("boot32", 0);
+    const uint32_t previous_boot = legacy_counter > wide_counter ? legacy_counter : wide_counter;
+    if (previous_boot == UINT32_MAX || (!g_settings.secure_id && previous_boot >= UINT16_MAX)) {
+        g_settings.boot = previous_boot;
+        Serial.println("[security] boot counter exhausted: transport disabled; install a coordinated protocol migration");
+        return;
+    }
+    g_settings.boot = previous_boot + 1;
+    g_settings.replay_ready = s_prefs.putUInt("boot32", g_settings.boot) == sizeof(g_settings.boot);
+    const uint16_t legacy_boot = g_settings.boot > UINT16_MAX ? UINT16_MAX : (uint16_t)g_settings.boot;
+    g_settings.replay_ready = s_prefs.putUShort("boot", legacy_boot) == sizeof(legacy_boot) && g_settings.replay_ready;
+    if (!g_settings.replay_ready) Serial.println("[security] cannot persist boot counter: transport disabled; repair flash storage");
 }
 
 bool tm_settings_save() {
@@ -133,29 +156,56 @@ bool tm_settings_save() {
         if (list[0]) strncat(list, ",", sizeof(list) - strlen(list) - 1);
         strncat(list, g_settings.edges[i], sizeof(list) - strlen(list) - 1);
     }
-    bool ok = s_prefs.putString("ssid", g_settings.ssid) >= 0;
-    ok = s_prefs.putString("pass", g_settings.password) >= 0 && ok;
-    ok = s_prefs.putString("key", g_settings.key) >= 0 && ok;
-    ok = s_prefs.putString("edges", list) >= 0 && ok;
+    // Preferences returns size_t, so >= 0 was always true, even on failure.
+    // An empty successful string also returns zero: read it back to
+    // distinguish that case from a failed write.
+    auto save_string = [](const char* name, const char* value) {
+        if (s_prefs.putString(name, value) != strlen(value)) return false;
+        char stored[TM_CLOUD_URL_MAX + 1] = {0};
+        return s_prefs.isKey(name) && s_prefs.getString(name, stored, sizeof(stored)) > 0 && !strcmp(stored, value);
+    };
+    bool ok = save_string("ssid", g_settings.ssid);
+    ok = save_string("pass", g_settings.password) && ok;
+    ok = save_string("key", g_settings.key) && ok;
+    ok = save_string("edges", list) && ok;
     ok = s_prefs.putUShort("node_id", g_settings.node_id) == sizeof(uint16_t) && ok;
     ok = s_prefs.putUChar("mode", g_settings.mode) == sizeof(uint8_t) && ok;
-    ok = s_prefs.putString("lora_gw", g_settings.lora_gw) >= 0 && ok;
+    ok = save_string("lora_gw", g_settings.lora_gw) && ok;
     ok = s_prefs.putUChar("transport", g_settings.transport) == sizeof(uint8_t) && ok;
-    ok = s_prefs.putString("cloud_url", g_settings.cloud_url) >= 0 && ok;
+    ok = save_string("cloud_url", g_settings.cloud_url) && ok;
     ok = s_prefs.putBytes("params", g_settings.params, sizeof(g_settings.params)) == sizeof(g_settings.params) && ok;
     return ok;
 }
 
-void tm_settings_persist_last_cmd() { s_prefs.putUInt("last_cmd", g_settings.last_cmd); }
+bool tm_settings_accept_command(uint32_t seq) {
+    if (!g_settings.replay_ready || seq <= g_settings.last_cmd || s_prefs.putUInt("last_cmd", seq) != sizeof(seq)) return false;
+    g_settings.last_cmd = seq;
+    return true;
+}
 
-void tm_settings_factory_reset() {
-    const uint16_t boot = g_settings.boot;
-    s_prefs.clear();
-    // Keep the boot counter: resetting it would make this node's next packets
-    // look like replays to every edge that has heard it before.
-    s_prefs.putUShort("boot", boot);
+bool tm_settings_factory_reset() {
+    const uint32_t boot = g_settings.boot;
+    const uint16_t secure_id = g_settings.secure_id;
+    uint8_t secure_master[32]; memcpy(secure_master, g_settings.secure_master, 32);
+    const uint32_t last_cmd = g_settings.last_cmd;
+    const bool replay_ready = g_settings.replay_ready;
+    // Never erase replay counters, even transiently. Clearing the namespace and
+    // then rewriting it loses replay protection if power or flash fails in
+    // between those operations.
+    const char* names[] = {"ssid", "pass", "key", "edges", "node_id", "mode", "lora_gw",
+                           "transport", "cloud_url", "params"};
+    bool ok = true;
+    for (const char* name : names) {
+        if (s_prefs.isKey(name) && !s_prefs.remove(name)) ok = false;
+    }
+    if (!ok) return false;
     load_defaults();
+    g_settings.secure_id = secure_id;
+    memcpy(g_settings.secure_master, secure_master, 32); memset(secure_master, 0, 32);
     g_settings.boot = boot;
+    g_settings.last_cmd = last_cmd;
+    g_settings.replay_ready = replay_ready;
+    return true;
 }
 
 bool tm_settings_set_param(uint8_t id, int32_t value) {
@@ -203,10 +253,11 @@ static void show() {
     Serial.printf("ssid      : %s\n", g_settings.ssid[0] ? g_settings.ssid : "(unset)");
     Serial.printf("password  : %s\n", g_settings.password[0] ? "(set)" : "(unset)");
     Serial.printf("edges     : %s %s\n", g_settings.edges[0][0] ? g_settings.edges[0] : "(none)", g_settings.edges[1]);
-    Serial.printf("key       : %s\n", g_settings.key[0] ? "(set)" : "(unset - telemetry unsigned)");
+    Serial.printf("key       : %s\n", g_settings.key[0] ? "(set)" : "(unset - legacy signing)");
     // New fields go before `boot`: TMflash stops reading `show` at that line.
     Serial.printf("transport : %s\n", g_settings.transport == TM_TRANSPORT_WSS ? "wss" : "udp");
     Serial.printf("cloud_url : %s\n", g_settings.cloud_url[0] ? g_settings.cloud_url : "(none)");
+    Serial.printf("encryption: %s (key id %u)\n", g_settings.secure_id ? "required" : "legacy", (unsigned)g_settings.secure_id);
     Serial.printf("caps      : %s\n", TM_CAPABILITIES);
     if (s_show_transport) s_show_transport();
     Serial.printf("boot      : %u   last_cmd: %lu\n", (unsigned) g_settings.boot, (unsigned long) g_settings.last_cmd);
@@ -227,7 +278,8 @@ static void help() {
         "  set cloud_url <wss://...> cloud endpoint for transport wss (TMedge node listener)\n"
         "  set transport <udp|wss>   udp: to `edges`; wss: straight to `cloud_url`\n"
         "  set lora_gw <ip>          TMLAccess address (LoRa mode)\n"
-        "  set key <string>          shared signing key (TMedge TM_KEY)\n"
+        "  set key <string>          legacy signing key (TMedge TM_KEY)\n"
+        "  set secure <id>:<64hex>   durable per-device encryption enrollment; reboots\n"
         "  param <name> <value>      detector/telemetry parameter, see `show`\n"
         "  save                      keep settings across reboots\n"
         "  reset-bg                  relearn the background\n"
@@ -249,14 +301,39 @@ static uint8_t execute(char* line) {
     if (!strcmp(cmd, "display")) { Serial.println("display on for 60 s"); return TM_CONSOLE_DISPLAY; }
     if (!strcmp(cmd, "reset-bg")) { Serial.println("relearning background"); return TM_CONSOLE_RESET_BG; }
     if (!strcmp(cmd, "factory")) {
-        tm_settings_factory_reset();
+        if (!tm_settings_factory_reset()) { Serial.println("FACTORY RESET FAILED"); return 0; }
         Serial.println("settings erased; `reboot` to apply");
-        return 0;
+        return TM_CONSOLE_NETWORK_CHANGED | TM_CONSOLE_PARAMS_CHANGED | TM_CONSOLE_RESET_BG;
     }
     if (!strcmp(cmd, "set")) {
         char* what = strtok(NULL, " ");
         char* value = strtok(NULL, "");   // rest of line: SSIDs may contain spaces
         if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw|cloud_url|transport> <value>"); return 0; }
+        if (!strcmp(what, "secure")) {
+            char* end = NULL;
+            const unsigned long id = strtoul(value, &end, 10);
+            if (end == value || *end != ':' || id < 1 || id > 65535 || strlen(end + 1) != 64) {
+                Serial.println("invalid: secure requires <1-65535>:<64 hex digits>"); return 0;
+            }
+            uint8_t record[34] = {(uint8_t)id, (uint8_t)(id >> 8)};
+            uint8_t any = 0;
+            for (int i = 0; i < 32; ++i) {
+                auto digit = [](char c) -> int { if (c >= '0' && c <= '9') return c - '0'; if (c >= 'a' && c <= 'f') return c - 'a' + 10; if (c >= 'A' && c <= 'F') return c - 'A' + 10; return -1; };
+                const int hi = digit(end[1 + 2*i]), lo = digit(end[2 + 2*i]);
+                if (hi < 0 || lo < 0) { memset(record, 0, sizeof(record)); Serial.println("invalid: secure key must be hex"); return 0; }
+                record[2 + i] = (uint8_t)((hi << 4) | lo); any |= record[2 + i];
+            }
+            if (!any) { Serial.println("invalid: secure key must be randomly generated"); return 0; }
+            // Policy first: an interrupted enrollment cannot reboot into plaintext.
+            bool ok = s_prefs.putUChar("secure_req", 1) == 1;
+            uint8_t stored[34] = {0};
+            ok = s_prefs.putBytes("secure", record, sizeof(record)) == sizeof(record) && ok;
+            ok = s_prefs.getBytes("secure", stored, sizeof(stored)) == sizeof(stored) && !memcmp(record, stored, sizeof(record)) && ok;
+            memset(record, 0, sizeof(record)); memset(stored, 0, sizeof(stored));
+            if (!ok) { g_settings.replay_ready = false; Serial.println("ENCRYPTION SAVE FAILED; rebooting fail closed"); }
+            else Serial.println("secure updated; rebooting");
+            return TM_CONSOLE_REBOOT;
+        }
         if (!strcmp(what, "cloud_url")) {
             TmCloudUrl url;
             const int r = tm_cloud_parse_url(value, TM_CLOUD_ALLOW_TEST_URL, &url);
@@ -312,12 +389,21 @@ static uint8_t execute(char* line) {
             // Checked here too, so a typo is refused at the console instead of
             // only being logged at the next boot.
             char copy[64];
+            if (strlen(value) >= sizeof(copy)) { Serial.println("invalid: edges too long"); return 0; }
             strncpy(copy, value, sizeof(copy) - 1);
             copy[sizeof(copy) - 1] = 0;
+            size_t count = 0;
             for (char* t = strtok(copy, ", "); t; t = strtok(NULL, ", ")) {
                 if (!is_ipv4(t)) { Serial.printf("invalid: edge \"%s\" is not an IPv4 address\n", t); return 0; }
+                if (++count > TM_MAX_EDGES) { Serial.println("invalid: too many edges"); return 0; }
             }
+            if (!count) { Serial.println("invalid: set at least one edge"); return 0; }
         }
+        size_t max_len = 0;
+        if (!strcmp(what, "ssid")) max_len = sizeof(g_settings.ssid) - 1;
+        else if (!strcmp(what, "pass")) max_len = sizeof(g_settings.password) - 1;
+        else if (!strcmp(what, "key")) max_len = sizeof(g_settings.key) - 1;
+        if (max_len && strlen(value) > max_len) { Serial.println("invalid: value too long"); return 0; }
         if (!strcmp(what, "ssid")) strncpy(g_settings.ssid, value, sizeof(g_settings.ssid) - 1);
         else if (!strcmp(what, "pass")) strncpy(g_settings.password, value, sizeof(g_settings.password) - 1);
         else if (!strcmp(what, "key")) strncpy(g_settings.key, value, sizeof(g_settings.key) - 1);
@@ -332,8 +418,10 @@ static uint8_t execute(char* line) {
         if (!name || !value) { Serial.println("usage: param <name> <value>"); return 0; }
         for (uint8_t i = 0; i < TM_PARAM_COUNT; ++i) {
             if (strcmp(name, SPECS[i].name)) continue;
-            const long v = strtol(value, NULL, 10);
-            if (!tm_settings_set_param(i, (int32_t) v)) {
+            char* end = NULL;
+            const long v = strtol(value, &end, 10);
+            if (end == value || *end || strtok(NULL, " ") || v < SPECS[i].min || v > SPECS[i].max ||
+                !tm_settings_set_param(i, (int32_t) v)) {
                 Serial.printf("%s must be %ld..%ld\n", name, (long) SPECS[i].min, (long) SPECS[i].max);
                 return 0;
             }

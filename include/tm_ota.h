@@ -32,6 +32,8 @@
 
 /** How long a freshly flashed image has to prove itself before it is reverted. */
 #define TM_OTA_PROVE_MS 180000
+/** Total image-stream deadline, independent of whether tiny reads keep arriving. */
+#define TM_OTA_DOWNLOAD_MS 180000
 
 /** Sends an OTA_STATUS packet; main owns the radio, so it provides this. */
 typedef void (*TmOtaReporter)(const TmOtaStatus* status);

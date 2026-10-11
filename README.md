@@ -83,6 +83,12 @@ the boot partition back to the image that was working and reboots. `src/tm_ota.c
 Progress is reported as OTA_STATUS packets, so a rollout can be watched from
 the console rather than guessed at.
 
+From `tmsense-1.7`, probation is recorded before activation, and restarting an
+unconfirmed image rolls back on its next boot. Confirmation needs a recent
+complete sensor frame; a successful probe alone is insufficient. Flash writes
+must persist before commands or OTA are applied. Downloads stop after three
+minutes even if tiny reads continue to arrive.
+
 ## Detector
 
 `src/tm_detector.cpp` is written for small blobs. At 3-5 m with this lens, a
@@ -100,6 +106,10 @@ the edge's job (see TMedge's Phase 3 design).
 ```bash
 python3 test/host/detector_test.py     # 23 scenarios, 110 deg at 3 m and 5 m
 test/host/build_packet_host.sh         # host build of the packet code (TMedge crosscheck uses it)
+test/host/build_cloud_host.sh && build/cloud_test && build/display_test
+bash test/host/build_safety_host.sh && build/safety_test  # OTA/NVS/I2C fault injection, UBSan
+python3 test/host/listen_test.py         # malformed UDP payload handling
+bash test/host/build_secure_host.sh      # actual mbedTLS AES-GCM vectors/tamper/downgrade (Linux libmbedtls-dev)
 TM_KEY=... python3 tools/listen.py --iface en0   # watch a live node
 ```
 
@@ -109,12 +119,29 @@ and drift. The C detector code runs on them unchanged.
 
 ## Security
 
-- Every packet carries a truncated HMAC-SHA256 tag (8 bytes).
+TMsense 1.7 supports individually enrolled AES-256-GCM payload encryption on
+UDP and WSS. See [the paired protocol and provisioning runbook](https://github.com/Mysteringz/TMedge/blob/main/docs/ENCRYPTED_NODE_PROTOCOL.md).
+Encryption is opt-in through trusted local `set secure <id>:<64hex>` provisioning
+and a private matching edge key policy. Provision compatible firmware in both
+OTA slots before enrollment; older recovery firmware cannot preserve the policy.
+
+- Enrolled telemetry, frames, commands and OTA requests use wire v2 with a
+  full 16-byte GCM tag, per-device direction keys and fresh key epochs. Direct
+  socket controls/grants are also encrypted and bound to their session challenge.
+- Legacy packets carry a truncated HMAC-SHA256 tag (8 bytes) without encryption.
 - `(boot, seq)` only ever increases, because the boot counter is kept in
   flash, so replays are rejected across reboots too.
 - Commands from the edge must be signed, addressed to this node's MAC, and
   newer than the last command applied. That check survives reboots.
-- The key is shared by every node on a site. See TMedge docs for rotation.
+- Factory reset preserves boot32, command high-water and encryption enrollment.
+  Interrupted enrollment and persistent counter failure disable networking.
+  Legacy nodes stop at 65,535 boots; enrolled v2 nodes use a 32-bit boot counter.
+- Enrolled UDP probation needs an authenticated accepted REPORT ACK. Legacy UDP
+  can only prove a send and needs migration for this assurance.
+- The legacy signing key is shared by a site; enrolled masters must be unique.
+  Never place production keys in firmware source or host-test fixtures. The
+  listener uses a private `--device-keys` file and Python `cryptography`; CI pins
+  its dependency. Host cloud tests need OpenSSL (macOS: `brew install openssl@3`).
 
 ## Continuous integration
 
