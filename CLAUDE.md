@@ -19,6 +19,7 @@ include/tm_ca_roots.h      trust roots for the cloud endpoint -- tools/update_ca
 src/tm_display.cpp         on-board OLED (Wire1, SDA 17 / SCL 18): splash, status, sleep
 src/tm_status_text.cpp     the status lines and the "may go dark" rule (host-tested)
 include/tm_display_assets.h  font + HKUMySeat logo -- tools/make_display_assets.py
+tools/release_manifest.py  packages a tmflash build as a release (.github/workflows/release.yml)
 src/main.cpp               loop
 src/MLX90640_*             Melexis driver (vendor code, with fixes; keep changes minimal)
 ```
@@ -30,6 +31,7 @@ tools/build.sh [upload [port]]           # arduino-cli build / flash
 python3 test/host/detector_test.py       # must pass after any detector change
 test/host/build_cloud_host.sh && build/cloud_test && build/display_test   # transport + display host tests
 TM_KEY=... python3 tools/listen.py --iface en0
+python3 test/host/release_manifest_test.py   # what a release may and may not be
 ```
 
 ## Invariants
@@ -62,6 +64,12 @@ TM_KEY=... python3 tools/listen.py --iface en0
   needs a new ACK for a REPORT from this boot -- not a socket write, `ready`,
   a ping or an old ACK. The protocol is TMedge/docs/DIRECT_NODE_PROTOCOL.md.
 - **Flashing never migrates a node.** No `transport` in NVS means udp.
+- **A release is what gets flashed, and a version names one image.** TMedge's
+  web flasher writes the latest GitHub release to boards with nobody reading
+  it first. Releases come only from the Release workflow on `main`, on a
+  commit CI has passed, built from `env:tmflash` (no bench secrets), tagged
+  from `TM_FW_VERSION`, and never replaced: raise the version instead. The manifest format is shared with
+  TMedge's `src/shared/flasher/release.ts`; change both together.
 - **The display is for start-up and on request, never all day.** It sleeps
   once every critical service has been healthy for 10 s (or after 10 min
   regardless); PRG or `display` wakes it for a minute. Vext is never switched

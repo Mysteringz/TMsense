@@ -1,0 +1,71 @@
+name: Release
+# Publishes the images TMedge's web flasher (algo console, module 07) writes
+# to a board. That page reads the latest release of this repository and
+# nothing else, so publishing here is what puts firmware on new nodes.
+#
+# Run it by hand from main ("Run workflow"). There is no tag to push: the tag
+# is derived from TM_FW_VERSION by tools/release_manifest.py, so a release can
+# only ever be named after what its firmware reports.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Add required reviewers to this environment in the repository settings to
+    # make a release wait for a second person.
+    environment: firmware-release
+    permissions:
+      contents: write
+      checks: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Only main is released
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Releases are cut from main, not from $GITHUB_REF_NAME"
+            exit 1
+          fi
+      # The tests are CI's, and are not repeated here where they could drift
+      # from it: a commit is released only once CI has passed on it.
+      - name: CI has passed on this commit
+        run: |
+          passed="$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA/check-runs" --paginate \
+            --jq '[.check_runs[] | select(.name == "check" and .conclusion == "success")] | length')"
+          if [ "${passed:-0}" -lt 1 ]; then
+            echo "::error::CI has not passed on $GITHUB_SHA. Wait for the CI run on main to finish green, then run this again."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install firmware tools
+        run: python -m pip install platformio==6.1.18
+      - name: Release packaging claims
+        run: python test/host/release_manifest_test.py
+      - name: Compile firmware without bench secrets
+        run: pio run -e tmflash
+      - name: Package the release
+        run: python tools/release_manifest.py --build .pio/build/tmflash --out dist --commit "$GITHUB_SHA"
+      - name: Publish
+        run: |
+          tag="$(python -c 'import json; print(json.load(open("dist/tmflash-manifest.json"))["tag"])')"
+          # A published version is never replaced: nodes in the field report
+          # it, and it has to keep meaning one image.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag is already released. Raise TM_FW_VERSION in include/tm_config.h first."
+            exit 1
+          fi
+          gh release create "$tag" \
+            dist/bootloader.bin dist/partitions.bin dist/firmware.bin dist/tmflash-manifest.json \
+            --target "$GITHUB_SHA" --title "TMsense ${tag#v}" --generate-notes

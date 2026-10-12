@@ -39,6 +39,10 @@ jobs:
         run: bash test/host/build_safety_host.sh && build/safety_test && python test/host/listen_test.py
       - name: Compile firmware without bench secrets
         run: pio run -e tmflash
+      # What release.yml would publish from this commit, so a change that
+      # makes the build unreleasable fails here and not on release day.
+      - name: Release packaging
+        run: python test/host/release_manifest_test.py && python tools/release_manifest.py --build .pio/build/tmflash --out build/release --commit "$GITHUB_SHA"
       - name: Compile the test-fixture build too (never released)
         run: pio run -e tmsense_testcloud
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
