@@ -38,7 +38,6 @@ typedef struct {
 void tm_cloud_begin(const TmCloudUrl* url, const uint8_t uid[6], const uint8_t* key, size_t key_len, uint32_t boot, const TmPacketContext* secure = NULL);
 /** Close the session and idle: transport switched back to udp. */
 void tm_cloud_stop();
-bool tm_cloud_active();
 
 /** Queue a copy of one packet. False if it was dropped. */
 bool tm_cloud_send(const uint8_t* data, size_t len);

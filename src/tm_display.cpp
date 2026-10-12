@@ -77,7 +77,6 @@ bool tm_display_begin() {
 }
 
 bool tm_display_present() { return s_present; }
-bool tm_display_is_on() { return s_on; }
 
 void tm_display_power(bool on) {
     if (!s_present || on == s_on) return;
