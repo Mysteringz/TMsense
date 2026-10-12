@@ -1,6 +1,9 @@
 #ifndef TM_PROTOCOL_H
 #define TM_PROTOCOL_H
 
+// This header documents legacy v1 payloads/header. Enrolled devices use the
+// same payloads inside the authenticated encrypted v2 envelope in tm_secure.h.
+
 /**
  * TMnode wire protocol, version 1 — SOURCE OF TRUTH.
  *
@@ -42,6 +45,8 @@
 #define TM_MAGIC_0 0x54  // 'T'
 #define TM_MAGIC_1 0x4D  // 'M'
 #define TM_PROTOCOL_VERSION 1
+// Encrypted v2 envelope/header is specified in tm_secure.h and the shared
+// TMedge/docs/ENCRYPTED_NODE_PROTOCOL.md contract. Legacy v1 is migration-only.
 
 #define TM_HEADER_SIZE 22
 #define TM_TAG_SIZE 8

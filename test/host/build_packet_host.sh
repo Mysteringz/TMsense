@@ -6,10 +6,14 @@ OUT="${1:-$ROOT/build/packet_host}"
 mkdir -p "$(dirname "$OUT")"
 # The mbedTLS shim uses CommonCrypto on macOS (linked implicitly) and OpenSSL
 # elsewhere, which has to be named -- this is what lets CI run on Linux.
-LIBS=()
-[ "$(uname)" = Darwin ] || LIBS=(-lcrypto)
+LIBS=(-lcrypto)
+if [ "$(uname)" = Darwin ]; then
+  CRYPTO_PREFIX="$(brew --prefix openssl@3)"
+  export CPLUS_INCLUDE_PATH="$CRYPTO_PREFIX/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+  export LIBRARY_PATH="$CRYPTO_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+fi
 g++ -std=c++17 -O1 -Wall -Wextra -Werror -Wno-unused-parameter -DTM_HOST_TEST \
     -I"$ROOT/test/host" -I"$ROOT/include" \
-    "$ROOT/test/host/packet_host.cpp" "$ROOT/src/tm_packet.cpp" "$ROOT/src/tm_detector.cpp" -o "$OUT" \
+    "$ROOT/test/host/packet_host.cpp" "$ROOT/src/tm_packet.cpp" "$ROOT/src/tm_secure.cpp" "$ROOT/src/tm_detector.cpp" -o "$OUT" \
     ${LIBS[@]+"${LIBS[@]}"}
 echo "$OUT"

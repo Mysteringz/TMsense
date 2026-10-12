@@ -19,7 +19,7 @@ const char* tm_cloud_state_name(TmCloudState s) {
 }
 
 void tm_cloud_session_init(TmCloudSession* s, const TmCloudUrl* url, const char uid[18],
-                           const uint8_t* key, size_t key_len, uint16_t boot) {
+                           const uint8_t* key, size_t key_len, uint32_t boot, const TmPacketContext* secure) {
     // Callbacks survive a re-init; everything else starts over.
     size_t (*next)(void*, uint8_t*, size_t, uint8_t*, uint32_t) = s->next_uplink;
     void (*discard)(void*) = s->discard_uplink;
@@ -35,6 +35,7 @@ void tm_cloud_session_init(TmCloudSession* s, const TmCloudUrl* url, const char 
     s->key = key;
     s->key_len = key_len;
     s->boot = boot;
+    if (secure) s->secure = *secure;
     s->state = TM_CLOUD_OFF;
     tm_ws_parser_reset(&s->parser);
 }
@@ -55,6 +56,8 @@ static void drop(TmCloudSession* s, const TmCloudIo* io, uint32_t now, const cha
     tm_ack_reset(&s->acks);
     s->session[0] = 0;
     s->challenge_answered = false;
+    memset(s->control_key, 0, 32);
+    s->control_seq = 0;
     s->report_acked_this_session = false;
     s->want_status = false;
     s->http_len = 0;
@@ -87,6 +90,17 @@ static void on_control(TmCloudSession* s, const TmCloudIo* io, const uint8_t* da
             if (s->state != TM_CLOUD_AUTHENTICATING || s->challenge_answered) {
                 drop(s, io, now, "unexpected challenge");
                 return;
+            }
+            if (s->secure.secure_id) {
+                uint8_t challenge[32];
+                for (int i = 0; i < 32; ++i) {
+                    auto digit = [](char x) -> uint8_t { return x <= '9' ? x - '0' : x - 'a' + 10; };
+                    challenge[i] = (digit(c.nonce[2*i]) << 4) | digit(c.nonce[2*i+1]);
+                }
+                if (!tm_secure_derive(s->secure.master, s->secure.uid, s->secure.secure_id, "control", challenge, 32, s->control_key)) {
+                    drop(s, io, now, "control key failure"); return;
+                }
+                s->control_seq = 0;
             }
             char auth[TM_CLOUD_CONTROL_MAX];
             const size_t n = tm_cloud_auth_json(auth, sizeof(auth), s->uid, c.nonce, s->key, s->key_len);
@@ -171,9 +185,25 @@ static void on_bytes(TmCloudSession* s, const TmCloudIo* io, const uint8_t* data
                 return;
             }
             case TM_WS_EV_TEXT:
+                if (s->secure.secure_id && (s->state != TM_CLOUD_AUTHENTICATING || s->challenge_answered)) {
+                    drop(s, io, now, "plaintext control refused"); return;
+                }
                 on_control(s, io, ev.data, ev.len, now);
                 break;
             case TM_WS_EV_BINARY:
+                if (s->secure.secure_id && ev.len >= TM_SECURE_HEADER + TM_SECURE_TAG && ev.data[3] == TM_TYPE_CONTROL) {
+                    const uint16_t id = (uint16_t)ev.data[24] | ((uint16_t)ev.data[25] << 8);
+                    if (id != s->secure.secure_id || memcmp(ev.data + 4, s->secure.uid, 6) || tm_wire_boot(ev.data) != 0 ||
+                        tm_wire_seq(ev.data) <= s->control_seq) { drop(s, io, now, "invalid encrypted control"); return; }
+                    uint8_t key[32];
+                    tm_secure_derive(s->control_key, s->secure.uid, id, "control-message", ev.data + 26, 16, key);
+                    const int n = tm_secure_open(ev.data, ev.len, key, s->pkt, TM_CLOUD_CONTROL_MAX);
+                    memset(key, 0, sizeof(key));
+                    if (n < 0) { drop(s, io, now, "encrypted control authentication failed"); return; }
+                    s->control_seq = tm_wire_seq(ev.data);
+                    on_control(s, io, s->pkt, (size_t)n, now);
+                    break;
+                }
                 if (s->state != TM_CLOUD_READY) {
                     drop(s, io, now, "packet before ready");
                     return;
@@ -241,9 +271,8 @@ static void transmit(TmCloudSession* s, const TmCloudIo* io, uint32_t now) {
         }
         ++s->sent;
         if ((type == TM_TYPE_REPORT || type == TM_TYPE_STATUS) && n >= TM_HEADER_SIZE) {
-            const uint16_t boot = (uint16_t) (s->pkt[10] | (s->pkt[11] << 8));
-            const uint32_t seq = (uint32_t) s->pkt[12] | ((uint32_t) s->pkt[13] << 8) | ((uint32_t) s->pkt[14] << 16) |
-                                 ((uint32_t) s->pkt[15] << 24);
+            const uint32_t boot = tm_wire_boot(s->pkt);
+            const uint32_t seq = tm_wire_seq(s->pkt);
             tm_ack_sent(&s->acks, type, boot, seq, now);
         }
     }

@@ -13,6 +13,8 @@ typedef struct {
     char password[65];
     char edges[TM_MAX_EDGES][16];   // dotted quads; empty = unused
     char key[TM_KEY_MAX_LEN + 1];   // ASCII; its bytes are the HMAC key
+    uint16_t secure_id;
+    uint8_t secure_master[32];
     // A label people use for the node (on the enclosure, in the install
     // manifest). Identity on the wire stays the factory MAC; 0 = unset.
     uint16_t node_id;
@@ -26,7 +28,8 @@ typedef struct {
     char cloud_url[TM_CLOUD_URL_MAX + 1];
     int32_t params[TM_PARAM_COUNT];
     uint32_t last_cmd;              // highest command sequence applied
-    uint16_t boot;                  // boot counter, incremented by tm_settings_begin
+    uint32_t boot;                  // boot counter, incremented by tm_settings_begin
+    bool replay_ready;              // boot counter persisted without wrapping; otherwise transport is disabled
 } TmSettings;
 
 #define TM_MODE_WIFI 0
@@ -36,7 +39,7 @@ typedef struct {
 #define TM_TRANSPORT_WSS 1
 
 /** What this firmware can do, for `show` (TMflash reads it before using new commands). */
-#define TM_CAPABILITIES "wss1,ota-https1,fps1"
+#define TM_CAPABILITIES "wss1,ota-https1,aead2,udp-ack1,boot32,fps1"
 
 /** A test build (env:tmsense_testcloud) also accepts ws:// and other ports, for a local fixture. */
 #if defined(TM_CLOUD_TEST_BUILD)
@@ -50,8 +53,9 @@ extern TmSettings g_settings;
 /** Load defaults, overlay what flash holds, bump and persist the boot counter. */
 void tm_settings_begin();
 bool tm_settings_save();
-void tm_settings_factory_reset();
-void tm_settings_persist_last_cmd();
+bool tm_settings_factory_reset();
+/** Persist replay protection before a command can have effects; false on stale sequence or flash failure. */
+bool tm_settings_accept_command(uint32_t seq);
 
 /** Validate and apply one parameter; false if out of range. */
 bool tm_settings_set_param(uint8_t id, int32_t value);

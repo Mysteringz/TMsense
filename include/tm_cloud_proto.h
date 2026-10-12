@@ -71,7 +71,7 @@ typedef struct {
     char session[33];        // ready, ack
     char uid[18];            // ready
     uint32_t heartbeat_ms;   // ready
-    uint16_t boot;           // ack
+    uint32_t boot;           // ack
     uint32_t seq;            // ack, ota_grant
     char build[17];          // ota_grant
     char token[65];          // ota_grant
@@ -114,7 +114,7 @@ size_t tm_cloud_auth_json(char* out, size_t max, const char* uid, const char* no
 typedef struct {
     struct {
         uint8_t type;
-        uint16_t boot;
+        uint32_t boot;
         uint32_t seq;
         uint32_t sent_ms;
     } e[TM_ACK_SLOTS];
@@ -122,14 +122,14 @@ typedef struct {
 } TmAckTracker;
 
 void tm_ack_reset(TmAckTracker* t);
-void tm_ack_sent(TmAckTracker* t, uint8_t type, uint16_t boot, uint32_t seq, uint32_t now_ms);
+void tm_ack_sent(TmAckTracker* t, uint8_t type, uint32_t boot, uint32_t seq, uint32_t now_ms);
 /**
  * Match an ACK. Returns the acknowledged packet's type (TM_TYPE_REPORT or
  * TM_TYPE_STATUS), or 0 if it names nothing outstanding. Entries sent before
  * the acknowledged one are dropped too: the edge acknowledges in order, so
  * they were refused (late, or lost) and will never be acknowledged.
  */
-uint8_t tm_ack_match(TmAckTracker* t, uint16_t boot, uint32_t seq);
+uint8_t tm_ack_match(TmAckTracker* t, uint32_t boot, uint32_t seq);
 /** Age of the oldest unacknowledged REPORT, 0 if there is none. */
 uint32_t tm_ack_oldest_report_age(const TmAckTracker* t, uint32_t now_ms);
 

@@ -9,17 +9,21 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "tm_protocol.h"
+#include "tm_secure.h"
 #include "tm_detector.h"
 
-#define TM_PACKET_MAX_SIZE (TM_HEADER_SIZE + TM_RAW_SIZE + TM_TAG_SIZE)
+#define TM_PACKET_MAX_SIZE TM_SECURE_MAX
 #define TM_KEY_MAX_LEN 64
 
 typedef struct {
     uint8_t uid[TM_UID_SIZE];
-    uint16_t boot;
+    uint32_t boot;
     uint32_t seq;            // next sequence number; the builders advance it
     uint8_t key[TM_KEY_MAX_LEN];
-    size_t key_len;          // 0 = unsigned (edge rejects unless ALLOW_UNSIGNED)
+    size_t key_len;          // legacy signing key
+    uint16_t secure_id;      // nonzero requires encrypted v2 in both directions
+    uint8_t master[32];      // individually provisioned, never a site-wide key
+    uint8_t epoch[16];       // fresh hardware random bytes for this running context
 } TmPacketContext;
 
 typedef struct {
@@ -103,6 +107,9 @@ int tm_parse_ota(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmOt
 
 /** Verify and decode a COMMAND addressed to ctx->uid. */
 int tm_parse_command(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmCommand* out);
+
+size_t tm_build_ack(uint8_t* out, const TmPacketContext* ctx, uint32_t boot, uint32_t seq, uint8_t type);
+int tm_parse_ack(const uint8_t* in, size_t len, const TmPacketContext* ctx, uint8_t* type);
 
 /** HMAC-SHA256(key, data) truncated to TM_TAG_SIZE. Zeros when key_len == 0. */
 void tm_auth_tag(const uint8_t* key, size_t key_len, const uint8_t* data, size_t len,
