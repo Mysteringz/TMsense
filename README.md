@@ -63,7 +63,7 @@ reboot
 `show` prints the settings; the password and key are never printed. `help`
 lists everything else (detector parameters, `reset-bg`, `factory`).
 
-TMsense 1.6 adds `set fps 1`, `set fps 2` and `set fps 4`. The rate takes
+TMsense 1.8 adds `set fps 1`, `set fps 2` and `set fps 4`. The rate takes
 effect immediately; `save` keeps it across reboots. `show` reports the configured
 rate as `fps` before `boot`, and advertises capability `fps1` for TMflash.
 These rates use MLX refresh codes 2, 3 and 4: the sensor needs two subpages

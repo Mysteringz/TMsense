@@ -44,3 +44,28 @@ oversized-upload HTTP test fails with `fetch failed`, and the encrypted
 cloud harness is refused with close code 4401. Both also fail under the
 CI Node 22 runtime. Wire-format checks and the plain cloud session checks
 pass; the packet layout was not changed by frame-rate selection.
+
+## Re-verified as TMsense 1.8 (2026-10-12)
+
+After merging main's encrypted-telemetry work, the same board was flashed with
+the secret-free `tmflash` image as TMsense 1.8, using TMflash's CLI built from
+its master. Saved settings survived; the boot counter rose from 87 to 92 over
+the run. `show` reported `encryption: legacy (key id 0)` and capabilities
+`wss1,ota-https1,aead2,udp-ack1,boot32,fps1`.
+
+| Selection | MLX refresh code | Measured full frames/s | Last firmware fps estimate | Set by |
+|---|---|---|---|---|
+| 1 fps | 2 | 0.982 | 0.98 | TMflash `--no-flash --fps 1`, saved, reboot; measured after a live `set fps 1` |
+| 2 fps | 3 | 1.959 | 1.96 | TMflash `--no-flash --fps 2`, saved, reboot |
+| 4 fps | 4 | 3.914 | 3.93 | TMflash `--no-flash --fps 4`, saved, reboot |
+
+Windows were 30 s for 2 and 4 fps and 61 s for 1 fps, shorter than the 70 s
+used above. After the flash and after each of the three rate changes the board
+rejoined Wi-Fi, authenticated its WSS uplink and TMedge acknowledged a report
+from the new boot.
+
+The five invalid `set fps` values above were rejected again. `set secure` was
+checked for refusals only: a zero ID, a short key, a non-hex key and an
+all-zero key were each rejected and left the node on legacy signing. The board
+was not enrolled, so encrypted transport was not exercised on hardware. The
+final saved rate is 4 fps, as before.
