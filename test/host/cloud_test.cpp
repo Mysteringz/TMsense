@@ -109,6 +109,8 @@ static void test_ws() {
     CHECK(big.type == TM_WS_EV_BINARY && big.len == 806, "an 806-byte RAW (16-bit length) passes");
     TmWsEvent cl = first_event(server_frame(TM_WS_OP_CLOSE, std::string("\x0f\xa9", 2)));
     CHECK(cl.type == TM_WS_EV_CLOSE && cl.close_code == 4009, "close code read");
+    CHECK(first_event(server_frame(TM_WS_OP_CLOSE, "x")).error == TM_WS_ERR_CONTROL,
+          "one-byte close code is refused as malformed");
 
     uint8_t out[64];
     const uint8_t mask[4] = {9, 8, 7, 6};
@@ -117,6 +119,8 @@ static void test_ws() {
     size_t used = 0;
     CHECK(n == 9 && client_frame(out, n, &back, &used) == TM_WS_OP_BINARY && back == "abc", "client frames are masked, final");
     CHECK(tm_ws_frame(out, 8, TM_WS_OP_BINARY, (const uint8_t*) "abc", 3, mask) == 0, "frame refuses to overflow");
+    CHECK(tm_ws_frame(out, sizeof(out), TM_WS_OP_BINARY, NULL, SIZE_MAX, mask) == 0,
+          "an overflowing frame length is refused before payload access");
 
     // RFC 6455's own example key and accept.
     const char* key = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -134,6 +138,20 @@ static void test_ws() {
     std::string login = "HTTP/1.1 302 Found\r\nLocation: https://x.cloudflareaccess.com/\r\n\r\n";
     CHECK(tm_ws_check_response(login.c_str(), login.size(), key, "tmnode.v1") == TM_WS_HS_STATUS,
           "an Access login redirect is not an upgrade");
+    std::string token_confusion = ok;
+    token_confusion.replace(token_confusion.find("Connection: Upgrade"), 19, "Connection: notupgrade");
+    CHECK(tm_ws_check_response(token_confusion.c_str(), token_confusion.size(), key, "tmnode.v1") == TM_WS_HS_UPGRADE,
+          "upgrade must be a complete Connection token");
+    std::string multi_token = ok;
+    multi_token.replace(multi_token.find("Connection: Upgrade"), 19, "Connection: keep-alive, Upgrade");
+    CHECK(tm_ws_check_response(multi_token.c_str(), multi_token.size(), key, "tmnode.v1") == TM_WS_HS_OK,
+          "comma-separated Connection tokens remain supported");
+    CHECK(tm_ws_check_response(ok.c_str(), ok.size() - 1, key, "tmnode.v1") == TM_WS_HS_STATUS,
+          "truncated upgrade head is refused");
+    std::string bad_status = ok;
+    bad_status.replace(bad_status.find("101 "), 4, "1010");
+    CHECK(tm_ws_check_response(bad_status.c_str(), bad_status.size(), key, "tmnode.v1") == TM_WS_HS_STATUS,
+          "an HTTP status prefix is not a valid 101 response");
 }
 
 static void test_url() {
@@ -250,6 +268,12 @@ static void test_acks_and_queue() {
     CHECK(tm_ack_oldest_report_age(&t, 7000) == 5000, "the report before an acknowledged packet is written off");
     CHECK(tm_ack_match(&t, 5, 12) == TM_TYPE_REPORT && t.n == 0, "report ack");
     CHECK(tm_ack_match(&t, 5, 12) == 0, "the same ACK twice counts once");
+    tm_ack_reset(&t);
+    for (uint32_t seq = 0; seq < 64; ++seq) tm_ack_sent(&t, TM_TYPE_REPORT, 5, seq, seq * 125);
+    CHECK(t.n == TM_ACK_SLOTS && tm_ack_oldest_report_age(&t, 8000) == 8000,
+          "eight reports per second cannot evict the evidence of a stalled path");
+    CHECK(tm_ack_match(&t, 5, 63) == TM_TYPE_REPORT && t.n == 0,
+          "a new accepted report still retires earlier refused reports after queue pressure");
 
     static TmPacketQueue q;
     tm_queue_clear(&q);
@@ -292,6 +316,11 @@ static void test_acks_and_queue() {
     CHECK(tm_http_parse_head(chunked.c_str(), chunked.size(), &h) && h.chunked && h.content_length == -1, "chunked seen");
     std::string neg = "HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n";
     CHECK(!tm_http_parse_head(neg.c_str(), neg.size(), &h), "a nonsense length is refused");
+    std::string duplicate_length = "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n";
+    CHECK(!tm_http_parse_head(duplicate_length.c_str(), duplicate_length.size(), &h), "duplicate Content-Length is ambiguous and refused");
+    CHECK(!tm_http_parse_head(ok.c_str(), ok.size() - 1, &h), "truncated HTTP header is refused");
+    std::string invalid_version = "HTTP/1.x 200 OK\r\nContent-Length: 6\r\n\r\n";
+    CHECK(!tm_http_parse_head(invalid_version.c_str(), invalid_version.size(), &h), "invalid HTTP version is refused");
 }
 
 // --- the session state machine, against a scripted edge -----------------------------
@@ -376,7 +405,14 @@ static void handshake(TmCloudSession* s, const TmCloudIo* io, FakeEdge& e, uint3
     e.written.clear();
     tm_cloud_session_step(s, io, now + 10, true, true);
     tm_cloud_session_step(s, io, now + 20, true, true);
-    push(e, server_frame(TM_WS_OP_TEXT, std::string("{\"type\":\"ready\",\"v\":1,\"uid\":\"") + uid + "\",\"session\":\"S1\",\"heartbeatMs\":15000}"));
+    const std::string ready = std::string("{\"type\":\"ready\",\"v\":1,\"uid\":\"") + uid + "\",\"session\":\"S1\",\"heartbeatMs\":15000}";
+    if (s->secure.secure_id) {
+        uint8_t epoch[16] = {1}, key[32], data[TM_PACKET_MAX_SIZE];
+        tm_secure_derive(s->control_key, s->secure.uid, s->secure.secure_id, "control-message", epoch, 16, key);
+        const size_t n = tm_secure_seal(data, sizeof(data), TM_TYPE_CONTROL, s->secure.uid, 0, 1, 0, s->secure.secure_id,
+                                      epoch, key, (const uint8_t*)ready.data(), ready.size());
+        push(e, server_frame(TM_WS_OP_BINARY, std::string((char*)data, n)));
+    } else push(e, server_frame(TM_WS_OP_TEXT, ready));
     tm_cloud_session_step(s, io, now + 30, true, true);
 }
 
@@ -508,6 +544,42 @@ static void test_session() {
     CHECK(e.connects == connects + 1, "resumed");
 }
 
+static void test_encrypted_controls() {
+    static TmCloudSession s;
+    TmCloudUrl url; tm_cloud_parse_url("wss://sense.hkumyseat.com/tmnode", false, &url);
+    TmPacketContext ctx = {};
+    const uint8_t uid[6] = {1, 2, 3, 4, 5, 6}; memcpy(ctx.uid, uid, 6);
+    ctx.boot = 70000; ctx.secure_id = 7; memset(ctx.master, 0x11, 32);
+    uint8_t auth[32]; tm_secure_derive(ctx.master, ctx.uid, 7, "auth", NULL, 0, auth);
+    for (int fault = 0; fault < 4; ++fault) {
+        FakeEdge e;
+        TmCloudIo io = {fe_connect, fe_write, fe_read, fe_close, fe_random, &e};
+        memset(&s, 0, sizeof(s));
+        tm_cloud_session_init(&s, &url, "01:02:03:04:05:06", auth, 32, ctx.boot, &ctx);
+        handshake(&s, &io, e, 1000);
+        CHECK(s.state == TM_CLOUD_READY && s.control_seq == 1, "encrypted READY authenticates after challenge");
+        const std::string ack = "{\"type\":\"ack\",\"v\":1,\"session\":\"S1\",\"boot\":70000,\"seq\":5}";
+        tm_ack_sent(&s.acks, TM_TYPE_REPORT, ctx.boot, 5, 1050);
+        uint8_t epoch[16] = {2}, key[32], data[TM_PACKET_MAX_SIZE];
+        uint8_t root[32]; memcpy(root, s.control_key, 32);
+        if (fault == 3) root[0] ^= 1; // another session's challenge key
+        tm_secure_derive(root, ctx.uid, 7, "control-message", epoch, 16, key);
+        const size_t n = tm_secure_seal(data, sizeof(data), TM_TYPE_CONTROL, ctx.uid, 0, 2, 0, 7, epoch, key,
+                                      (const uint8_t*)ack.data(), ack.size());
+        if (fault == 1) data[n - 1] ^= 1;
+        const auto frame = fault == 2 ? server_frame(TM_WS_OP_TEXT, ack) : server_frame(TM_WS_OP_BINARY, std::string((char*)data, n));
+        push(e, frame); tm_cloud_session_step(&s, &io, 1100, true, true);
+        if (!fault) {
+            CHECK(s.reports_acked == 1 && s.state == TM_CLOUD_READY, "authenticated encrypted ACK proves REPORT delivery with boot32");
+            push(e, frame); tm_cloud_session_step(&s, &io, 1110, true, true);
+            CHECK(s.state == TM_CLOUD_BACKOFF && s.reports_acked == 1, "replayed encrypted control cannot acknowledge twice");
+        } else {
+            CHECK(s.state == TM_CLOUD_BACKOFF && s.reports_acked == 0,
+                  "tampered, plaintext or wrong-session ACK fails closed without delivery proof");
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     test_ws();
     test_url();
@@ -515,6 +587,7 @@ int main(int argc, char** argv) {
     test_auth(argc > 1 ? argv[1] : "test/host/fixtures/tmnode_auth_vectors.json");
     test_acks_and_queue();
     test_session();
+    test_encrypted_controls();
     printf("cloud_test: %d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

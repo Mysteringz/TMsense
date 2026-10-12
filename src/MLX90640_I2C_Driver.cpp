@@ -101,7 +101,10 @@ int MLX90640_I2CWrite(uint8_t _deviceAddress, unsigned int writeAddress, uint16_
   }
 
   uint16_t dataCheck;
-  MLX90640_I2CRead(_deviceAddress, writeAddress, 1, &dataCheck);
+  if (MLX90640_I2CRead(_deviceAddress, writeAddress, 1, &dataCheck) != 0)
+  {
+    return -1;
+  }
   if (dataCheck != data)
   {
     //Serial.println("The write request didn't stick");

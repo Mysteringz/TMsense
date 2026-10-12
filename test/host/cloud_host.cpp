@@ -192,6 +192,12 @@ int main(int argc, char** argv) {
     g_ctx.key_len = 14;
     memcpy(g_ctx.key, "crosscheck-key", 14);
 
+    if (argc > 2 && !strcmp(argv[2], "secure")) {
+        g_ctx.secure_id = 7; g_ctx.boot = 70000;
+        memset(g_ctx.master, 0x11, 32); memset(g_ctx.epoch, 0x22, 16);
+        g_ctx.key_len = 32;
+        if (!tm_secure_derive(g_ctx.master, g_ctx.uid, 7, "auth", NULL, 0, g_ctx.key)) return 2;
+    }
     TmCloudUrl url;
     const int r = tm_cloud_parse_url(argv[1], true, &url);
     if (r != TM_URL_OK) {
@@ -204,7 +210,7 @@ int main(int argc, char** argv) {
     g_s.next_uplink = cb_next;
     g_s.discard_uplink = cb_discard;
     g_s.on_downlink = cb_down;
-    tm_cloud_session_init(&g_s, &url, uid_s, g_ctx.key, g_ctx.key_len, g_ctx.boot);
+    tm_cloud_session_init(&g_s, &url, uid_s, g_ctx.key, g_ctx.key_len, g_ctx.boot, &g_ctx);
     tm_queue_clear(&g_queue);
     const TmCloudIo io = {io_connect, io_write, io_read, io_close, io_random, NULL};
 
