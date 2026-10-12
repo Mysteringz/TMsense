@@ -9,12 +9,14 @@ The firmware supports local Wi-Fi UDP and direct secure WebSocket transport. Opt
 - **Small-blob detection.** The [detector](src/tm_detector.cpp) learns a per-pixel background and noise model, thresholds temperature contrast, and splits connected regions at heat peaks. Pixels assigned to accepted people are protected from background adaptation.
 - **Complete-frame acquisition.** The [sensor reader](src/tm_sensor.cpp) waits for both MLX90640 subpages before emitting a frame. It repairs broken or implausible pixels using valid neighbors.
 - **Compact binary telemetry.** The [wire contract](include/tm_protocol.h) uses explicit little-endian fields and quantized measurements. Reports hold up to 24 detections while remaining within a 222-byte transport budget.
-- **Persistent replay protection.** [Packet authentication](src/tm_packet.cpp) uses truncated HMAC-SHA256 tags. Boot and command counters survive restarts through [persistent settings](src/tm_settings.cpp).
+- **Authenticated telemetry and persistent replay protection.** Legacy [packet authentication](src/tm_packet.cpp) uses truncated HMAC-SHA256 tags. Enrolled nodes use [AES-256-GCM encryption](src/tm_secure.cpp) with per-device keys on UDP and WSS. Boot and command counters survive restarts and factory resets through [persistent settings](src/tm_settings.cpp). See the [encryption and provisioning runbook](https://github.com/Mysteringz/TMedge/blob/main/docs/ENCRYPTED_NODE_PROTOCOL.md) for enrollment and recovery requirements.
 - **Separate sensing and network work.** The [cloud transport](src/tm_cloud.cpp) runs networking in a dedicated FreeRTOS task with bounded queues, keeping TLS work away from the sensor loop.
 - **Explicit certificate-date checks.** Direct-cloud connections verify the certificate chain, hostname, and validity dates. A cloud report acknowledgement proves delivery to the edge.
 - **One firmware image for every node.** The release configuration in [platformio.ini](platformio.ini) excludes bench credentials. Identity and site settings are provisioned through the serial console and stored in flash.
-- **Checked updates with rollback.** [OTA handling](src/tm_ota.cpp) verifies the requested SHA-256 before booting an image. Startup probation checks Wi-Fi, sensor operation, and uplink health; direct-cloud operation requires fresh accepted reports.
-- **Runtime sampling controls.** [Settings](src/tm_settings.cpp) expose sensor refresh, RAW cadence, and detector parameters without rebuilding. Detector timing and RAW cadence are measured in frames, so their intervals in seconds change with the sampling rate.
+- **Checked updates with rollback.** [OTA handling](src/tm_ota.cpp) verifies the requested SHA-256 before booting an image. Startup probation checks Wi-Fi, a recent complete sensor frame, and uplink health; direct-cloud and enrolled UDP operation require fresh accepted REPORT acknowledgements. Restarting an unconfirmed image rolls back on its next boot.
+- **Runtime sampling controls.** [Settings](src/tm_settings.cpp) expose `set fps 1`, `set fps 2` and `set fps 4` for complete thermal frames per second (default 1), plus RAW cadence and detector parameters, without rebuilding. The rate applies immediately; `save` keeps it across reboots. Detector timing and RAW cadence are measured in frames, so their intervals in seconds shorten and telemetry traffic increases at higher rates.
+
+TMsense 1.8 reports the configured rate as `fps` before `boot` in `show` and advertises capability `fps1` for TMflash. The 1, 2 and 4 fps settings use MLX90640 refresh codes 2, 3 and 4 because each complete frame needs two subpages. The existing `param refresh` control and stored settings remain compatible.
 
 ## Technologies and libraries
 
@@ -49,4 +51,4 @@ TMsense/
 - [test/host/](test/host/) runs firmware components on a desktop, including simulated thermal scenes, protocol fixtures, and crypto compatibility shims.
 - [tools/](tools/) contains build helpers, a telemetry listener, certificate updates, and display-asset generation.
 
-Host tests exercise the detector, packet serializer, cloud session, WebSocket framing, and display logic. The companion TMedge cross-check parses bytes emitted by the actual firmware serializer.
+Host tests exercise the detector, packet serializer, encryption, cloud session, WebSocket framing, display logic, and OTA/settings/sensor fault handling. The companion TMedge cross-check parses bytes emitted by the actual firmware serializer.

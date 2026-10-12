@@ -259,6 +259,8 @@ static void show() {
     Serial.printf("cloud_url : %s\n", g_settings.cloud_url[0] ? g_settings.cloud_url : "(none)");
     Serial.printf("encryption: %s (key id %u)\n", g_settings.secure_id ? "required" : "legacy", (unsigned)g_settings.secure_id);
     Serial.printf("caps      : %s\n", TM_CAPABILITIES);
+    // MLX codes describe subpages; two subpages make one complete frame.
+    Serial.printf("fps       : %g\n", (double) (1u << g_settings.params[TM_PARAM_REFRESH]) / 4.0);
     if (s_show_transport) s_show_transport();
     Serial.printf("boot      : %u   last_cmd: %lu\n", (unsigned) g_settings.boot, (unsigned long) g_settings.last_cmd);
     for (uint8_t i = 0; i < TM_PARAM_COUNT; ++i) {
@@ -280,6 +282,7 @@ static void help() {
         "  set lora_gw <ip>          TMLAccess address (LoRa mode)\n"
         "  set key <string>          legacy signing key (TMedge TM_KEY)\n"
         "  set secure <id>:<64hex>   durable per-device encryption enrollment; reboots\n"
+        "  set fps <1|2|4>           complete thermal frames per second\n"
         "  param <name> <value>      detector/telemetry parameter, see `show`\n"
         "  save                      keep settings across reboots\n"
         "  reset-bg                  relearn the background\n"
@@ -308,7 +311,19 @@ static uint8_t execute(char* line) {
     if (!strcmp(cmd, "set")) {
         char* what = strtok(NULL, " ");
         char* value = strtok(NULL, "");   // rest of line: SSIDs may contain spaces
-        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw|cloud_url|transport> <value>"); return 0; }
+        if (!what || !value) { Serial.println("usage: set <ssid|pass|edges|key|id|mode|lora_gw|cloud_url|transport|fps> <value>"); return 0; }
+        if (!strcmp(what, "fps")) {
+            int32_t refresh;
+            if (!strcmp(value, "1")) refresh = 2;
+            else if (!strcmp(value, "2")) refresh = 3;
+            else if (!strcmp(value, "4")) refresh = 4;
+            else { Serial.println("invalid: fps must be 1, 2 or 4"); return 0; }
+            // Reuse the persisted/wire parameter so serial and edge commands
+            // keep controlling the same setting, including on older nodes.
+            tm_settings_set_param(TM_PARAM_REFRESH, refresh);
+            Serial.println("fps updated (not saved)");
+            return TM_CONSOLE_PARAMS_CHANGED;
+        }
         if (!strcmp(what, "secure")) {
             char* end = NULL;
             const unsigned long id = strtoul(value, &end, 10);

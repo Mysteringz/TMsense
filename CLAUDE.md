@@ -72,6 +72,7 @@ TM_KEY=... python3 tools/listen.py --iface en0
 ## Hardware notes
 
 Heltec V3, MLX90640 at 0x33 on SDA 41 / SCL 42, 1 MHz I²C. Refresh code 2
-(2 Hz subpages) gives 1 full frame/s. The MLX needs a moment after power-on,
+(2 Hz subpages) gives 1 full frame/s; codes 3 and 4 give 2 and 4 fps.
+`set fps <1|2|4>` selects these without exposing subpage codes. The MLX needs a moment after power-on,
 which is why the probe retries.
 On the dev Mac, NordVPN blocks LAN traffic: bind receivers to `en0`.

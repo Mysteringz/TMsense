@@ -50,7 +50,10 @@ bool tm_sensor_begin(int sda, int scl, uint32_t i2c_hz, uint8_t refresh_code) {
 
 bool tm_sensor_set_refresh(uint8_t refresh_code) {
     if (refresh_code < 1 || refresh_code > 5) return false;
-    return MLX90640_SetRefreshRate(TM_MLX_ADDRESS, refresh_code) == 0;
+    if (MLX90640_SetRefreshRate(TM_MLX_ADDRESS, refresh_code) != 0) return false;
+    // Do not pair a half-frame acquired at the old rate with one at the new rate.
+    s_have[0] = s_have[1] = false;
+    return true;
 }
 
 // Pixels the EEPROM marks broken or outlying, and any reading that is not a
