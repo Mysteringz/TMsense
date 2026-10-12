@@ -338,6 +338,7 @@ void tm_cloud_stop() {
     s_status_request = false;
     UNLOCK();
 }
+
 bool tm_cloud_send(const uint8_t* data, size_t len) {
     if (!s_lock) return false;
     LOCK();
