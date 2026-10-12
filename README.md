@@ -156,8 +156,34 @@ OTA slots before enrollment; older recovery firmware cannot preserve the policy.
 ## Continuous integration
 
 CI runs the packet harness, detector scenarios and a PlatformIO `tmflash`
-compile without bench secrets. The firmware artifact is retained for 30 days.
+compile without bench secrets, then packages that build the way a release
+would be. The firmware artifact is retained for 30 days.
 Flashing remains an explicit pilot-first operation.
+
+## Releases
+
+TMedge's web flasher (algo console, module 07) writes the **latest release of
+this repository** to boards, and nothing else. Publishing a release is
+therefore what puts firmware on newly flashed nodes.
+
+To publish: raise `TM_FW_VERSION` in `include/tm_config.h`, merge to `main`,
+then run the **Release** workflow from `main` (Actions, "Run workflow", or
+`gh workflow run release.yml --ref main`). It refuses a commit CI has not
+passed, builds `env:tmflash`, and publishes four files:
+
+```
+bootloader.bin  partitions.bin  firmware.bin    what a blank board needs
+tmflash-manifest.json                           version, commit, size and SHA-256 of each
+```
+
+The tag is derived from the version (`tmsense-1.5` becomes `v1.5`), never
+typed, and a version that is already released is refused: a node reports that
+string, and it must name one image. The workflow runs in the
+`firmware-release` environment; add required reviewers to it in the
+repository settings to make a release wait for a second person.
+
+`tools/release_manifest.py` writes the manifest and TMedge reads it
+(`src/shared/flasher/release.ts` there). Change the two together.
 
 Default-branch changes go through a pull request with required checks.
 GitHub Actions dependencies are pinned and updated through Dependabot PRs.
