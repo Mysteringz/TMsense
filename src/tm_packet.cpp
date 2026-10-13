@@ -199,21 +199,6 @@ size_t tm_build_ota_status(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_m
     return seal(out, TM_OTA_STATUS_SIZE, ctx);
 }
 
-size_t tm_build_ota(uint8_t* out, const TmPacketContext* ctx, const TmOtaRequest* ota) {
-    // The header's boot/seq/uptime are meaningless downlink; zero, as COMMAND.
-    write_header(out, TM_TYPE_OTA, ctx->uid, 0, 0, 0);
-    uint8_t* p = out + TM_HEADER_SIZE;
-    put32(p, ota->seq);
-    put16(p + 4, ota->port);
-    put32(p + 6, ota->size);
-    memcpy(p + 10, ota->sha256, 32);
-    memset(p + 42, 0, TM_OTA_PATH_LEN);
-    size_t path_len = 0;
-    while (path_len < TM_OTA_PATH_LEN && ota->path[path_len]) ++path_len;
-    memcpy(p + 42, ota->path, path_len);
-    return seal(out, TM_OTA_SIZE, ctx);
-}
-
 int tm_parse_ota(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmOtaRequest* out) {
     uint8_t p[TM_OTA_SIZE];
     const int r = payload(in, len, ctx, TM_TYPE_OTA, p, sizeof(p));

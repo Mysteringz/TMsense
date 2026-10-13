@@ -338,13 +338,6 @@ void tm_cloud_stop() {
     s_status_request = false;
     UNLOCK();
 }
-bool tm_cloud_active() {
-    if (!s_lock) return false;
-    LOCK();
-    const bool enabled = s_enabled;
-    UNLOCK();
-    return enabled;
-}
 
 bool tm_cloud_send(const uint8_t* data, size_t len) {
     if (!s_lock) return false;

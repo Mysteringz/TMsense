@@ -90,9 +90,6 @@ size_t tm_build_ota_status(uint8_t* out, TmPacketContext* ctx, uint32_t uptime_m
 /** Build a COMMAND (used by host tests; the edge has its own builder). */
 size_t tm_build_command(uint8_t* out, const TmPacketContext* ctx, const TmCommand* cmd);
 
-/** Build an OTA request (host tests; the edge has its own builder). */
-size_t tm_build_ota(uint8_t* out, const TmPacketContext* ctx, const TmOtaRequest* ota);
-
 /** Parse an OTA request addressed to this node. Same checks as a COMMAND. */
 int tm_parse_ota(const uint8_t* in, size_t len, const TmPacketContext* ctx, TmOtaRequest* out);
 

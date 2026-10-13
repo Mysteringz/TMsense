@@ -29,6 +29,5 @@ void tm_display_status(const char lines[TM_STATUS_LINES][TM_STATUS_COLS + 1]);
 
 /** Panel on / asleep (charge pump off). Vext is left on: the sensor may share it. */
 void tm_display_power(bool on);
-bool tm_display_is_on();
 
 #endif // TM_DISPLAY_H
